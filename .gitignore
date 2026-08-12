@@ -1,0 +1,4 @@
+.local/
+.claude/
+.DS_Store
+*.log
