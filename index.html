@@ -693,6 +693,7 @@ const S = {
   username:'', leagueId:'', isCommish:false,
   leagueInfo:null, myRoster:null, allRosters:[], users:{},
   tradedPicks:[], players:{}, fcValues:{}, fcList:[],
+  fcPos:{QB:[],RB:[],WR:[],TE:[]}, fcPickSlot:{}, fcPickGeneric:{}, fcPickTier:{},
   matchups:{}, standings:[], transactions:[],
   currentWeek:1, totalWeeks:18, superflex:false,
   allPlayersOnRosters: new Set(),
@@ -837,7 +838,7 @@ async function refreshData(){
 
 // ── RESET ──────────────────────────────────────────────────────────────
 function resetApp(){
-  Object.assign(S,{leagueInfo:null,myRoster:null,allRosters:[],users:{},tradedPicks:[],players:{},fcValues:{},fcList:[],matchups:{},standings:[],transactions:[],allPlayersOnRosters:new Set(),managerProfiles:[],leagueMedians:{}});
+  Object.assign(S,{leagueInfo:null,myRoster:null,allRosters:[],users:{},tradedPicks:[],players:{},fcValues:{},fcList:[],fcPos:{QB:[],RB:[],WR:[],TE:[]},fcPickSlot:{},fcPickGeneric:{},fcPickTier:{},matchups:{},standings:[],transactions:[],allPlayersOnRosters:new Set(),managerProfiles:[],leagueMedians:{}});
   tradePieces.give=[]; tradePieces.get=[]; finderTarget=null;
   show('rosterLoading'); hide('rosterContent');
   $id('weeklyStats').innerHTML=''; $id('matchupList').innerHTML=''; $id('standingsList').innerHTML='';
@@ -897,17 +898,25 @@ async function loadAll(){
     // Store ALL players (needed so we can look up any league player, not just mine)
     S.players=allP;
 
-    // Build FC value map keyed by normalized name + a searchable list
+    // Build FC value map. FantasyCalc returns BOTH players and draft picks;
+    // split them so picks feed the pick-value tables and players feed grades/BAP.
     const fcMap={}; const fcList=[];
+    S.fcPickSlot={}; S.fcPickGeneric={}; S.fcPickTier={};
     if(Array.isArray(fcRaw)) fcRaw.forEach(p=>{
       if(!p.player?.name) return;
       const nm=p.player.name;
+      const isPick=p.player.position==='PICK'||/^20\d\d\b/.test(nm)||/\bpick\b/i.test(nm);
+      if(isPick){ ingestFcPick(nm,p.value); return; }
       const rec={value:p.value,rank:p.overallRank,posRank:p.positionRank,pos:p.player.position||'?',team:p.player.maybeTeam||'',name:nm};
       fcMap[nm.toLowerCase()]=rec;
       fcList.push(rec);
     });
     S.fcValues=fcMap;
     S.fcList=fcList.sort((a,b)=>b.value-a.value);
+    // positional value distributions (FantasyCalc baseline for grading)
+    S.fcPos={QB:[],RB:[],WR:[],TE:[]};
+    S.fcList.forEach(r=>{ if(S.fcPos[r.pos]) S.fcPos[r.pos].push(r.value); });
+    Object.keys(S.fcPos).forEach(k=>S.fcPos[k].sort((a,b)=>b-a));
 
     saveRecent(S.leagueId,league.name||S.leagueId,S.username,S.isCommish?'yes':'no');
 
@@ -947,18 +956,46 @@ function getRosterTotalValue(r){
 }
 
 // pick value lookup
+// Parse a FantasyCalc pick label into {year,round,slot,tier} and file its value.
+function ingestFcPick(nm,value){
+  const year=(nm.match(/20\d\d/)||[])[0]; if(!year) return;
+  let round=null,slot=null,tier=null;
+  const sm=nm.match(/(\d)\.(\d{1,2})/); if(sm){ round=+sm[1]; slot=+sm[2]; }
+  else { const o=nm.match(/\b([1-4])(?:st|nd|rd|th)\b/); if(o) round=+o[1]; }
+  const tm=nm.match(/\((Early|Mid|Late)\)/i); if(tm) tier=tm[1].toLowerCase();
+  if(!round) return;
+  if(slot!=null){ (S.fcPickSlot[year]=S.fcPickSlot[year]||{})[round]=S.fcPickSlot[year][round]||{}; S.fcPickSlot[year][round][slot]=value; }
+  else if(tier){ (S.fcPickTier[year]=S.fcPickTier[year]||{})[round]=S.fcPickTier[year][round]||{}; S.fcPickTier[year][round][tier]=value; }
+  else { (S.fcPickGeneric[year]=S.fcPickGeneric[year]||{})[round]=value; }
+}
+
+// Generic (slot-unknown) pick value — prefers live FantasyCalc, falls back to static chart.
 function pickValue(season,round){
-  const tbl=PICK_VALUES[String(season)]||DEFAULT_PICK;
+  const y=String(season);
+  if(S.fcPickGeneric?.[y]?.[round]!=null) return S.fcPickGeneric[y][round];
+  if(S.fcPickTier?.[y]?.[round]?.mid!=null) return S.fcPickTier[y][round].mid;
+  const sm=S.fcPickSlot?.[y]?.[round];
+  if(sm){ const vals=Object.entries(sm).sort((a,b)=>a[0]-b[0]).map(x=>x[1]); if(vals.length) return vals[Math.floor(vals.length/2)]; }
+  const tbl=PICK_VALUES[y]||DEFAULT_PICK;
   return tbl[round]||DEFAULT_PICK[round]||0;
 }
 
-// Slot-aware value: decays from the round's early value toward the next round's
-// as the pick moves later within the round (e.g. 1.01 >> 1.12).
+// Slot-aware value — uses FantasyCalc's exact slot value when available,
+// else its Early/Mid/Late tiers, else interpolates toward the next round.
 function slotPickValue(season,round,pickInRound,teams){
+  const y=String(season);
+  const sm=S.fcPickSlot?.[y]?.[round];
+  if(sm){
+    if(sm[pickInRound]!=null) return sm[pickInRound];
+    const keys=Object.keys(sm).map(Number).sort((a,b)=>a-b);
+    if(keys.length){ let best=keys[0]; for(const k of keys) if(Math.abs(k-pickInRound)<Math.abs(best-pickInRound)) best=k; return sm[best]; }
+  }
+  const t=S.fcPickTier?.[y]?.[round];
+  if(t){ const tier=pickInRound<=teams/3?'early':pickInRound<=2*teams/3?'mid':'late'; if(t[tier]!=null) return t[tier]; }
   const start=pickValue(season,round);
-  const next=round<4?pickValue(season,round+1):pickValue(season,4)*0.4; // floor for last round
-  const t=teams>1?(pickInRound-1)/teams:0;
-  return Math.round(start+(next-start)*t);
+  const next=round<4?pickValue(season,round+1):pickValue(season,4)*0.4;
+  const frac=teams>1?(pickInRound-1)/teams:0;
+  return Math.round(start+(next-start)*frac);
 }
 
 // Owned picks value for a roster
@@ -1274,18 +1311,30 @@ function computeLeagueMedians(){
 // ══════════════════════════════════════════════════════════════════════════
 // ENGINE 1 — ROSTER GRADER (replaces runDynastyAI)
 // ══════════════════════════════════════════════════════════════════════════
-function gradePosition(players){
-  // players: [{p, val, age}]
-  const withVal=players.filter(x=>x.val>0);
-  if(!withVal.length) return {grade:'F',avgVal:0,avgAge:null,count:0};
+// Starters per team by position (Superflex-aware) — sets the FC-rank grading scale.
+function startersPerTeam(pos){ return ({QB:S.superflex?2:1,RB:2,WR:3,TE:1})[pos]||2; }
+
+// Grade a position group against the FantasyCalc positional-rank landscape.
+// A player's FC positionRank is compared to how many start league-wide at that
+// position, so a #1 TE grades A even though its raw value trails a mid WR.
+function gradePosition(players,pos){
+  const withVal=players.filter(x=>x.val>0).sort((a,b)=>b.val-a.val);
+  if(!withVal.length) return {grade:'F',avgVal:0,avgAge:null,count:0,avgRank:null};
+  const teams=S.leagueInfo?.total_rosters||12;
+  const L=Math.max(1,teams*startersPerTeam(pos));           // league-wide starters at pos
+  const k=startersPerTeam(pos);
+  const starters=withVal.slice(0,k);
+  const ranks=starters.map(x=>x.posRank||999);
+  const avgRank=ranks.reduce((a,b)=>a+b,0)/ranks.length;
   const avgVal=withVal.reduce((s,x)=>s+x.val,0)/withVal.length;
   const ages=withVal.filter(x=>x.age!=null);
   const avgAge=ages.length?ages.reduce((s,x)=>s+x.age,0)/ages.length:null;
   let grade='F';
-  for(const t of GRADE_THRESHOLDS){
-    if(avgVal>=t.minValue && (avgAge==null||avgAge<=t.maxAge)){ grade=t.g; break; }
-  }
-  return {grade,avgVal,avgAge,count:withVal.length};
+  if(avgRank<=L*0.30) grade='A';
+  else if(avgRank<=L*0.60) grade='B';
+  else if(avgRank<=L*1.05) grade='C';
+  else if(avgRank<=L*1.60) grade='D';
+  return {grade,avgVal,avgAge,count:withVal.length,avgRank};
 }
 
 function gradeToGpa(g){ return {A:4,B:3,C:2,D:1,F:0}[g]??0; }
@@ -1297,8 +1346,8 @@ function gradeRoster(){
   const g=groupByPos(r.players);
   const posData={};
   ['QB','RB','WR','TE'].forEach(pos=>{
-    const players=(g[pos]||[]).map(x=>({p:x.p,val:fcVal(x.p)?.value||0,age:pAge(x.p)}));
-    posData[pos]=gradePosition(players);
+    const players=(g[pos]||[]).map(x=>{const fc=fcVal(x.p);return {p:x.p,val:fc?.value||0,age:pAge(x.p),posRank:fc?.posRank};});
+    posData[pos]=gradePosition(players,pos);
   });
 
   // Overall = value-weighted GPA across positions
@@ -1402,12 +1451,16 @@ function fuzzyMatch(input){
 function parsePick(raw){
   const s=raw.trim();
   const yr=(s.match(/20\d\d/)||[])[0];
-  let rd=null;
-  const ord=s.match(/(\d)\s*(st|nd|rd|th)\b/i); if(ord) rd=parseInt(ord[1]);
-  const rdm=s.match(/\b(?:rd|round|r)\s*(\d)\b/i); if(rdm) rd=parseInt(rdm[1]);
+  let rd=null, slot=null;
+  const slotM=s.match(/\b([1-4])\.(\d{1,2})\b/); if(slotM){ rd=+slotM[1]; slot=+slotM[2]; } // "1.05"
+  if(!rd){ const ord=s.match(/(\d)\s*(st|nd|rd|th)\b/i); if(ord) rd=parseInt(ord[1]); }
+  if(!rd){ const rdm=s.match(/\b(?:rd|round|r)\s*(\d)\b/i); if(rdm) rd=parseInt(rdm[1]); }
   if(!rd){ const only=s.match(/\b([1-4])\b/); if(only && yr) rd=parseInt(only[1]); }
   if(yr && rd){
-    return {type:'pick',name:`${yr} ${['1st','2nd','3rd','4th'][rd-1]||'Rd'+rd}`,value:pickValue(yr,rd),pos:'PICK',age:null,season:yr,round:rd};
+    const teams=S.leagueInfo?.total_rosters||12;
+    const value=slot!=null?slotPickValue(yr,rd,slot,teams):pickValue(yr,rd);
+    const label=slot!=null?`${yr} ${rd}.${String(slot).padStart(2,'0')}`:`${yr} ${['1st','2nd','3rd','4th'][rd-1]||'Rd'+rd}`;
+    return {type:'pick',name:label,value:Math.round(value),pos:'PICK',age:null,season:yr,round:rd,slot};
   }
   return null;
 }
