@@ -952,6 +952,15 @@ function pickValue(season,round){
   return tbl[round]||DEFAULT_PICK[round]||0;
 }
 
+// Slot-aware value: decays from the round's early value toward the next round's
+// as the pick moves later within the round (e.g. 1.01 >> 1.12).
+function slotPickValue(season,round,pickInRound,teams){
+  const start=pickValue(season,round);
+  const next=round<4?pickValue(season,round+1):pickValue(season,4)*0.4; // floor for last round
+  const t=teams>1?(pickInRound-1)/teams:0;
+  return Math.round(start+(next-start)*t);
+}
+
 // Owned picks value for a roster
 function rosterPickValue(rosterId){
   return S.tradedPicks.filter(p=>String(p.owner_id)===String(rosterId))
@@ -1753,6 +1762,12 @@ function computeManagerProfiles(){
   // league averages for pick capital + positional bias
   const pickCaps=S.allRosters.map(r=>rosterPickValue(r.roster_id));
   const avgPickCap=pickCaps.reduce((a,b)=>a+b,0)/(pickCaps.length||1);
+  const maxPickCap=Math.max(...pickCaps,1);
+  // roster-strength percentile inputs (contention signal for win-now index)
+  const allTotalVals=S.allRosters.map(r=>(r.players||[]).reduce((s,id)=>s+(fcVal(S.players[id])?.value||0),0));
+  const sortedValsAsc=[...allTotalVals].sort((a,b)=>a-b);
+  const nTeams=S.allRosters.length;
+  const anyGames=S.allRosters.some(r=>((r.settings?.wins||0)+(r.settings?.losses||0)+(r.settings?.ties||0))>0);
 
   // league-wide positional value totals for bias comparison
   const leaguePosTotals={QB:0,RB:0,WR:0,TE:0};
@@ -1800,11 +1815,23 @@ function computeManagerProfiles(){
     const constrLabel=vals[0]<3000?'No Stars':topRatio>2?'Star-Driven':'Balanced Depth';
 
     // 5. Win-Now vs Rebuild Index (0-100)
+    //   Blends four signals so a strong veteran contender scores high while a
+    //   weak-but-old roster (bad team that hasn't sold) does NOT read as win-now:
+    //     contention  — roster-value percentile (can they actually compete?)
+    //     ageLean     — value tilted to 27+ (win-now) vs under-25 (building)
+    //     pickLean    — few future picks = win-now; stockpiling picks = rebuild
+    //     winPct      — actual record (only once games are played)
+    const clamp01=x=>Math.max(0,Math.min(1,x));
     const oldShare=aged.filter(x=>x.age>=27).reduce((s,x)=>s+x.val,0)/totalVal;
+    const youngShare=aged.filter(x=>x.age<25).reduce((s,x)=>s+x.val,0)/totalVal;
     const games=(r.settings?.wins||0)+(r.settings?.losses||0)+(r.settings?.ties||0);
-    const winPct=games?(r.settings?.wins||0)/games:0.5;
-    const lowPickCapFactor=avgPickCap>0?Math.max(0,1-pickCap/(avgPickCap*2)):0.5;
-    const winNowIdx=Math.round(Math.min(100,Math.max(0,(oldShare*100*0.5)+(winPct*100*0.3)+(lowPickCapFactor*100*0.2))));
+    const winPct=games?(r.settings?.wins||0)/games:null;
+    const contention=nTeams>1?sortedValsAsc.indexOf(totalVal)/(nTeams-1):0.5;
+    const ageLean=clamp01(0.5+(oldShare-youngShare));
+    const pickLean=1-clamp01(pickCap/maxPickCap);
+    const winNowIdx=Math.round(100*(winPct!=null
+      ? (0.34*contention+0.28*ageLean+0.18*pickLean+0.20*winPct)
+      : (0.42*contention+0.35*ageLean+0.23*pickLean)));
 
     // 6. Trade tendencies — approximate from extra/deficit pick capital (no full txn scan)
     const pickSwing=pickCap-avgPickCap;
@@ -1914,9 +1941,10 @@ function renderDraftOrder(){
   for(let rd=1;rd<=4;rd++){
     const pickNum=rd%2===1?myPickSlot:(totalTeams-myPickSlot+1);
     const overall=(rd-1)*totalTeams+pickNum;
-    mySlots.push({rd,pickNum,overall,val:pickValue(2026,rd)});
+    mySlots.push({rd,pickNum,overall,val:slotPickValue(2026,rd,pickNum,totalTeams)});
   }
-  $id('myPickSlots').innerHTML=`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">Based on current standings (snake draft) · est. pick values</p>
+  const noGames=sorted.every(r=>totalPts(r)===0);
+  $id('myPickSlots').innerHTML=`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">${noGames?'⚠️ Season hasn\'t started — order is provisional until games are played. ':''}Snake draft · slot-adjusted pick values</p>
     ${mySlots.map(s=>`<div class="draft-slot">
       <div class="draft-pick-num mine">${s.overall}</div>
       <div style="flex:1"><div style="font-size:13px;font-weight:600;color:var(--blue)">Round ${s.rd}, Pick ${s.pickNum}</div><div class="draft-proj">Overall #${s.overall} · ~${fmtVal(s.val)} value</div></div>
