@@ -47,15 +47,9 @@ No account, no sign-up, no API key.
 - Works offline after first load, except for live Sleeper / FantasyCalc data fetches.
 - Mobile-first responsive layout with iOS home-screen (PWA-style) support.
 
-## Development
+## Contributing
 
-The entire app is `index.html`. Edit it directly and push — GitHub Pages redeploys in under a minute.
-
-```bash
-git add index.html
-git commit -m "your change"
-git push
-```
+Changes go through a pull request against `master` — direct pushes to the default branch are not accepted. Open a PR and it can be reviewed and merged.
 
 ---
 
