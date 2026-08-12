@@ -345,6 +345,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
       <div class="hl-sub" id="hSub">—</div>
     </div>
     <div class="header-right">
+      <div class="league-pill" id="refreshPill" onclick="refreshData()">⟳ Refresh</div>
       <div class="league-pill" onclick="showModal('switcherModal')">⇄ Switch League</div>
       <button class="btn-ghost" onclick="goBack()">← Setup</button>
     </div>
@@ -807,6 +808,25 @@ async function startApp(overUser,overLeague,overCommish){
 }
 
 function goBack(){ hide('appScreen'); show('setupScreen'); initSetup(); }
+
+// Re-pull live Sleeper + FantasyCalc data for the current league without leaving the app
+async function refreshData(){
+  const pill=$id('refreshPill');
+  if(pill.dataset.busy==='1') return;
+  pill.dataset.busy='1';
+  const old=pill.innerHTML; pill.innerHTML='⟳ Refreshing…';
+  pill.style.opacity='.6';
+  const activeTab=(document.querySelector('nav button.active')?.getAttribute('onclick')||'').match(/showTab\('([a-z]+)'/)?.[1]||'roster';
+  try{
+    resetApp();
+    await loadAll();
+    // restore the tab the user was on
+    const btn=[...document.querySelectorAll('nav button')].find(b=>(b.getAttribute('onclick')||'').includes(`'${activeTab}'`));
+    if(btn) showTab(activeTab,btn);
+  } finally {
+    pill.innerHTML=old; pill.style.opacity=''; pill.dataset.busy='';
+  }
+}
 
 // ── RESET ──────────────────────────────────────────────────────────────
 function resetApp(){
