@@ -295,7 +295,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
   <div class="setup-card">
     <div class="field-label">Your Sleeper Username</div>
     <div class="field-hint">Enter your username and we'll pull every dynasty league you're in.</div>
-    <input type="text" id="inUser" placeholder="e.g. kmiller2316" value="kmiller2316" onkeydown="if(event.key==='Enter')findMyLeagues()"/>
+    <input type="text" id="inUser" placeholder="your Sleeper username" onkeydown="if(event.key==='Enter')findMyLeagues()"/>
 
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <div style="flex:1;min-width:120px">
@@ -729,7 +729,14 @@ function parseLeagueId(raw){
 }
 
 // ── SETUP ──────────────────────────────────────────────────────────────
-function initSetup(){ populateSeasons(); renderRecentSetup(); }
+function initSetup(){ populateSeasons(); prefillUser(); renderRecentSetup(); }
+
+// Prefill username from this browser's own last-used league (blank for new visitors)
+function prefillUser(){
+  const el=$id('inUser'); if(!el||el.value) return;
+  const last=getRecent()[0];
+  if(last?.username) el.value=last.username;
+}
 
 function populateSeasons(){
   const sel=$id('inSeason'); if(!sel || sel.options.length) return;
