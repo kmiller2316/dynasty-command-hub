@@ -567,6 +567,21 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
     <div id="tab-managers" class="tab">
       <div class="g4" id="mgrSummary" style="margin-bottom:16px"></div>
       <div class="card">
+        <details>
+          <summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--teal)">📖 What do these labels mean? (legend)</summary>
+          <div style="margin-top:12px;font-size:12px;color:var(--text2);line-height:1.6">
+            <div style="margin-bottom:10px"><span class="badge badge-blue">Win-Now Index</span> 0–100 — how positioned a team is to win now vs. build for later. Blends roster strength (value rank), how much value sits in 27+ vs. under-25 players, future draft-pick stockpiling, and record once games are played. High = win-now, low = rebuild.</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Overall profile</b> (from Win-Now Index): <span class="badge badge-red">All-In Contender</span> ≥65 · <span class="badge badge-yellow">Balanced Competitor</span> 45–64 · <span class="badge badge-blue">Retooling</span> 25–44 · <span class="badge badge-green">Full Rebuild</span> &lt;25</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Age profile</b> (value-weighted avg age): <b>Youth-Focused</b> &lt;24.5 · <b>Prime Window</b> 24.5–26.5 · <b>Win-Now</b> 26.5–28 · <b>Aging Core</b> 28+</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Positional bias</b>: <b>X-Heavy</b> = well above league-average share of value at that position · <b>X-Needy</b> = notably thin there · <b>Balanced</b> = no strong tilt</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Pick capital</b>: <b>Pick Rich</b> = &gt;30% above league-avg pick value · <b>Average</b> · <b>Pick Poor</b> = &gt;30% below</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Roster construction</b>: <b>Star-Driven</b> = top-3 players carry most value · <b>Balanced Depth</b> = value spread out · <b>No Stars</b> = no elite piece</div>
+            <div style="margin-bottom:8px"><b style="color:var(--text1)">Trade posture</b>: <b>Pick Accumulator</b> = holds surplus future picks · <b>Win-Now Buyer</b> = has spent picks for players · <b>Passive</b> = near league-average pick capital</div>
+            <div><b style="color:var(--text1)">Matchup luck</b> (record vs. what their scoring rank predicts): <span class="badge badge-green">Lucky</span> winning more than points suggest · <span class="badge badge-gray">Even</span> · <span class="badge badge-red">Unlucky</span> losing despite good scoring. <span style="color:var(--text3)">Shows “Even” for everyone before the season starts.</span></div>
+          </div>
+        </details>
+      </div>
+      <div class="card">
         <div class="section-header">
           <div class="card-title teal" style="margin-bottom:0">👤 Manager Profiles</div>
           <select id="mgrSort" onchange="renderManagers()" style="width:auto;margin-bottom:0;font-size:12px;padding:5px 10px">
@@ -701,8 +716,16 @@ const S = {
 };
 
 const SLEEPER = p => `https://api.sleeper.app/v1${p}`;
-const FC_API  = `https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=1&ppr=1&numTeams=12`;
-const FC_SF   = `https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=2&ppr=1&numTeams=12`;
+// FantasyCalc values matched to THIS league's format (QB count, PPR, team count).
+function fcUrl(){
+  const sc=S.leagueInfo?.scoring_settings||{};
+  const rec=sc.rec!=null?sc.rec:1;                       // points per reception
+  const ppr=rec>=0.75?1:rec>=0.25?0.5:0;                 // FC supports 0 / 0.5 / 1
+  const numQbs=S.superflex?2:1;
+  const teams=Math.min(16,Math.max(8,S.leagueInfo?.total_rosters||12));
+  S.scoringLabel=ppr===1?'PPR':ppr===0.5?'Half PPR':'Standard';
+  return `https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=${numQbs}&ppr=${ppr}&numTeams=${teams}`;
+}
 
 async function get(url){ const r=await fetch(url); if(!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
 function $id(id){ return document.getElementById(id); }
@@ -869,9 +892,10 @@ async function loadAll(){
     const rp=league.roster_positions||[];
     const qbSlots=rp.filter(p=>p==='QB').length;
     S.superflex=qbSlots>=2||rp.includes('SUPER_FLEX');
+    const recSc=league.scoring_settings?.rec; S.scoringLabel=(recSc>=0.75||recSc==null)?'PPR':recSc>=0.25?'Half PPR':'Standard';
 
     $id('hLeagueName').textContent=league.name||'Your League';
-    $id('hSub').textContent=`${S.username} · ${league.total_rosters||'?'} teams · Week ${S.currentWeek}${S.superflex?' · SF':''}`;
+    $id('hSub').textContent=`${S.username} · ${league.total_rosters||'?'} teams · ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'} · Week ${S.currentWeek}`;
 
     const um={};
     usersArr.forEach(u=>{ um[u.user_id]=u; });
@@ -892,7 +916,7 @@ async function loadAll(){
 
     const [allP, fcRaw] = await Promise.all([
       get('https://api.sleeper.app/v1/players/nfl'),
-      get(S.superflex?FC_SF:FC_API).catch(()=>[])
+      get(fcUrl()).catch(()=>[])
     ]);
 
     // Store ALL players (needed so we can look up any league player, not just mine)
@@ -1488,6 +1512,9 @@ const searchCfg={
   target:{input:'searchTarget',results:'searchResultsTarget'}
 };
 let searchSel={give:-1,get:-1,target:-1};
+// cache the current result entries per side so clicks reference an index,
+// never a name embedded in an onclick string (handles apostrophes like "Tre' Harris").
+let searchCache={give:[],get:[],target:[]};
 
 function searchCandidates(q){
   const nn=normName(q);
@@ -1503,11 +1530,13 @@ function onSearchInput(side){
   // pick detection preview
   const pick=parsePick(q);
   const cands=searchCandidates(q);
-  if(!cands.length && !pick){ box.style.display='none'; box.innerHTML=''; return; }
-  let html='';
-  if(pick) html+=`<div class="search-item" onclick="pickSearchResult('${side}','__PICK__')"><span class="pos pos-PICK">PICK</span><span class="search-item-name">${esc(pick.name)}</span><span class="search-item-val">${fmtVal(pick.value)}</span></div>`;
-  html+=cands.map(r=>`<div class="search-item" onclick="pickSearchResult('${side}','${esc(r.name).replace(/'/g,"\\'")}')"><span class="pos pos-${r.pos}">${r.pos}</span><span class="search-item-name">${esc(r.name)}</span><span class="search-item-val">${fmtVal(r.value)}</span></div>`).join('');
-  box.innerHTML=html; box.style.display='block';
+  if(!cands.length && !pick){ box.style.display='none'; box.innerHTML=''; searchCache[side]=[]; return; }
+  const entries=[];
+  if(pick) entries.push({piece:pick,pos:'PICK',name:pick.name,value:pick.value});
+  cands.forEach(r=>entries.push({piece:toPiece(r.name),pos:r.pos,name:r.name,value:r.value}));
+  searchCache[side]=entries;
+  box.innerHTML=entries.map((e,i)=>`<div class="search-item" onclick="pickSearchIdx('${side}',${i})"><span class="pos pos-${e.pos}">${e.pos}</span><span class="search-item-name">${esc(e.name)}</span><span class="search-item-val">${fmtVal(e.value)}</span></div>`).join('');
+  box.style.display='block';
 }
 
 function onSearchKey(e,side){
@@ -1524,10 +1553,11 @@ function onSearchKey(e,side){
   items.forEach((it,i)=>it.classList.toggle('sel',i===searchSel[side]));
 }
 
-function pickSearchResult(side,name){
-  const raw=name==='__PICK__'?$id(searchCfg[side].input).value:name;
-  if(side==='target'){ setFinderTarget(toPiece(raw)); clearSearch('target'); return; }
-  addPiece(side,toPiece(raw));
+function pickSearchIdx(side,i){
+  const entry=searchCache[side]?.[i];
+  if(!entry||!entry.piece){ clearSearch(side); return; }
+  if(side==='target'){ setFinderTarget(entry.piece); clearSearch('target'); return; }
+  addPiece(side,entry.piece);
   clearSearch(side);
 }
 
@@ -1795,7 +1825,7 @@ function generateOffers(){
       <div class="mgr-metric"><span>Acceptance odds</span><span class="mv">${acceptLabel}</span></div>
       <div class="counter-box" style="margin-top:8px"><div class="counter-label">📈 Escalation</div><div style="font-size:12px;color:var(--text1)">${esc(counterLine)}</div></div>
     </div>
-    <p style="font-size:11px;color:var(--text3);text-align:center">Values from FantasyCalc ${S.superflex?'superflex':'1QB'} · picks from a static dynasty pick chart. Tweak with the mode toggle or mark untouchables above.</p>`;
+    <p style="font-size:11px;color:var(--text3);text-align:center">Values from FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'} · picks valued live from FantasyCalc. Tweak with the mode toggle or mark untouchables above.</p>`;
 }
 
 function managerWeakPositions(r){
@@ -1893,8 +1923,8 @@ function computeManagerProfiles(){
     // 7. Matchup luck — actual wins vs points-based expected
     const ptsRank=[...S.allRosters].sort((a,b)=>totalPts(b)-totalPts(a)).findIndex(x=>String(x.roster_id)===String(r.roster_id));
     const expWinPct=S.allRosters.length>1?1-(ptsRank/(S.allRosters.length-1)):0.5;
-    const luck=winPct-expWinPct;
-    const luckLabel=luck>0.15?'Lucky':luck<-0.15?'Unlucky':'Even';
+    const luck=winPct==null?0:winPct-expWinPct;
+    const luckLabel=winPct==null?'Even':luck>0.15?'Lucky':luck<-0.15?'Unlucky':'Even';
 
     // overall profile label
     const profile = winNowIdx>=65?'All-In Contender':winNowIdx>=45?'Balanced Competitor':winNowIdx>=25?'Retooling':'Full Rebuild';
