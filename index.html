@@ -360,6 +360,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
     <button onclick="showTab('traderec',this)"><span class="nav-icon">📨</span>Trade Finder</button>
     <button onclick="showTab('draft',this)"><span class="nav-icon">🎯</span>Draft Center</button>
     <button onclick="showTab('managers',this)"><span class="nav-icon">👤</span>Managers</button>
+    <button onclick="showTab('gmgrades',this)"><span class="nav-icon">📊</span>GM Grades</button>
     <button id="commishNavBtn" onclick="showTab('commish',this)" style="display:none"><span class="nav-icon">🏅</span>Commissioner</button>
   </nav>
 
@@ -615,6 +616,31 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
           </select>
         </div>
         <div class="mgr-grid" id="mgrGrid"></div>
+      </div>
+    </div>
+
+    <!-- ── GM GRADES TAB ── -->
+    <div id="tab-gmgrades" class="tab">
+      <div class="card">
+        <div class="card-title orange">📊 GM Report Card</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:6px">Grades every manager on three skills, using FantasyCalc values at today's prices:</p>
+        <ul style="font-size:12px;color:var(--text3);margin:0 0 12px 18px;line-height:1.7">
+          <li><b style="color:var(--text2)">Drafting</b> — did their rookie picks turn out better or worse than the draft slot suggested?</li>
+          <li><b style="color:var(--text2)">Trading</b> — net value gained or lost across all completed trades.</li>
+          <li><b style="color:var(--text2)">Waivers</b> — value of players they pulled off waivers/FA that are still on their roster.</li>
+        </ul>
+        <div id="gmControls" style="display:none;margin-bottom:4px">
+          <div class="inner-tabs">
+            <button class="inner-tab active" onclick="sortGm('overall',this)">Overall</button>
+            <button class="inner-tab" onclick="sortGm('draft',this)">Draft</button>
+            <button class="inner-tab" onclick="sortGm('trade',this)">Trade</button>
+            <button class="inner-tab" onclick="sortGm('waiver',this)">Waiver</button>
+          </div>
+        </div>
+        <div id="gmLoading" class="loading" style="display:none"><div class="spinner"></div>Reading drafts + every transaction…</div>
+        <div id="gmResult">
+          <div class="center"><button class="btn btn-primary" style="width:auto" onclick="loadGmGrades()">Build GM Report Card</button></div>
+        </div>
       </div>
     </div>
 
@@ -893,6 +919,8 @@ function resetApp(){
   $id('tradeAnalyzeResult').style.display='none';
   $id('pieceGive').innerHTML=''; $id('pieceGet').innerHTML='';
   $id('mgrGrid').innerHTML=''; $id('mgrSummary').innerHTML='';
+  S.gmData=null; $id('gmControls').style.display='none';
+  $id('gmResult').innerHTML='<div class="center"><button class="btn btn-primary" style="width:auto" onclick="loadGmGrades()">Build GM Report Card</button></div>';
   hideErr('gErr');
   showTab('roster',document.querySelector('nav button'));
 }
@@ -1991,6 +2019,114 @@ function managerWeakPositions(r){
     if(total < (S.leagueMedians[pos]||0)*0.75) weak.push(pos);
   });
   return weak;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// GM REPORT CARD — grade each manager on drafting / trading / waivers
+// ══════════════════════════════════════════════════════════════════════════
+let gmSort='overall';
+async function loadGmGrades(){
+  $id('gmResult').innerHTML=''; show('gmLoading');
+  try{
+    // completed rookie draft picks
+    const draftPicks=[];
+    for(const d of (S.drafts||[])){
+      if(d.status!=='complete') continue;
+      const ps=await get(SLEEPER(`/draft/${d.draft_id}/picks`)).catch(()=>[]);
+      ps.forEach(p=>draftPicks.push({...p,dseason:d.season}));
+    }
+    // every transaction across the season
+    const maxW=Math.max(S.currentWeek||1,S.totalWeeks||1,18);
+    const weeks=await Promise.all(Array.from({length:maxW},(_,i)=>get(SLEEPER(`/league/${S.leagueId}/transactions/${i+1}`)).catch(()=>[])));
+    S.gmData=computeGmGrades(draftPicks,weeks.flat());
+    $id('gmControls').style.display='block';
+    renderGmGrades();
+  }catch(e){ $id('gmResult').innerHTML=`<div class="err">${esc(e.message)}</div><div class="center" style="padding:12px"><button class="btn btn-primary" style="width:auto" onclick="loadGmGrades()">Retry</button></div>`; }
+  hide('gmLoading');
+}
+
+function computeGmGrades(draftPicks,tx){
+  const teams=S.allRosters.length;
+  const pidVal=pid=>fcVal(S.players[pid])?.value||0;
+  const acc={};
+  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftVOE:0,draftCount:0,tradeNet:0,tradeCount:0,waiverVal:0,waiverCount:0});
+
+  // DRAFT: current value vs the value expected at that draft slot
+  draftPicks.forEach(p=>{
+    const a=acc[p.roster_id]; if(!a) return;
+    const slotInRound=p.pick_no-(p.round-1)*teams;
+    const expected=slotPickValue(p.dseason,p.round,slotInRound,teams);
+    a.draftVOE+=(pidVal(p.player_id)-expected); a.draftCount++;
+  });
+
+  // TRADES: net current value in vs out (players + picks)
+  tx.filter(t=>t.type==='trade'&&t.status==='complete').forEach(t=>{
+    (t.roster_ids||[]).forEach(rid=>{
+      const a=acc[rid]; if(!a) return; a.tradeCount++;
+      Object.entries(t.adds||{}).forEach(([pid,r])=>{ if(r===rid) a.tradeNet+=pidVal(pid); });
+      Object.entries(t.drops||{}).forEach(([pid,r])=>{ if(r===rid) a.tradeNet-=pidVal(pid); });
+      (t.draft_picks||[]).forEach(dp=>{ const v=pickValue(dp.season,dp.round); if(dp.owner_id===rid) a.tradeNet+=v; if(dp.previous_owner_id===rid) a.tradeNet-=v; });
+    });
+  });
+
+  // WAIVERS/FA: value of pickups still on the roster today
+  tx.filter(t=>(t.type==='waiver'||t.type==='free_agent')&&t.status==='complete').forEach(t=>{
+    Object.entries(t.adds||{}).forEach(([pid,rid])=>{
+      const a=acc[rid]; if(!a) return; a.waiverCount++;
+      const roster=S.allRosters.find(r=>String(r.roster_id)===String(rid));
+      if(roster&&(roster.players||[]).map(String).includes(String(pid))) a.waiverVal+=pidVal(pid);
+    });
+  });
+
+  const rows=Object.values(acc);
+  // grade each metric by rank within the league (higher = better)
+  gradeMetric(rows,'draftVOE','draftGrade',r=>r.draftCount>0);
+  gradeMetric(rows,'tradeNet','tradeGrade',r=>r.tradeCount>0);
+  gradeMetric(rows,'waiverVal','waiverGrade',r=>true);
+  rows.forEach(r=>{
+    const gpas=['draftGrade','tradeGrade','waiverGrade'].map(k=>r[k]).filter(g=>g&&g!=='—').map(gradeToGpa);
+    r.overallGpa=gpas.length?gpas.reduce((a,b)=>a+b,0)/gpas.length:0;
+    r.overall=gpas.length?gpaToGrade(r.overallGpa):'—';
+  });
+  return rows;
+}
+
+function gradeMetric(rows,valKey,gradeKey,eligible){
+  const elig=rows.filter(eligible);
+  const sorted=[...elig].sort((a,b)=>b[valKey]-a[valKey]);
+  const n=sorted.length;
+  sorted.forEach((r,i)=>{ const pct=n>1?i/(n-1):0; r[gradeKey]=pct<=0.2?'A':pct<=0.4?'B':pct<=0.6?'C':pct<=0.8?'D':'F'; });
+  rows.filter(r=>!eligible(r)).forEach(r=>r[gradeKey]='—');
+}
+
+function sortGm(k,btn){ gmSort=k; document.querySelectorAll('#gmControls .inner-tab').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); renderGmGrades(); }
+
+function renderGmGrades(){
+  const rows=[...(S.gmData||[])];
+  const key={overall:'overallGpa',draft:'draftVOE',trade:'tradeNet',waiver:'waiverVal'}[gmSort];
+  rows.sort((a,b)=>(b[key]||0)-(a[key]||0));
+  const gc=g=>gradeColor(g==='—'?'C':g);
+  const money=v=>(v>=0?'+':'−')+fmtVal(Math.abs(Math.round(v)));
+  $id('gmResult').innerHTML=`<div class="mgr-grid">`+rows.map(r=>{
+    const isMe=String(r.rid)===String(S.myRoster.roster_id);
+    const cell=(label,grade,detail)=>`<div style="flex:1;text-align:center">
+        <div style="font-size:22px;font-weight:800;color:${gc(grade)}">${grade}</div>
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${label}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px">${detail}</div>
+      </div>`;
+    return `<div class="mgr-card ${isMe?'mine':''}">
+      <div class="mgr-head">
+        <div><div class="mgr-name">${esc(r.name)}${isMe?' ★':''}</div><div class="mgr-label">Overall GM grade</div></div>
+        <div style="font-size:26px;font-weight:800;color:${gc(r.overall)}">${r.overall}</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        ${cell('Draft',r.draftGrade,r.draftCount?money(r.draftVOE):'no picks')}
+        ${cell('Trade',r.tradeGrade,r.tradeCount?`${money(r.tradeNet)} · ${r.tradeCount}`:'no trades')}
+        ${cell('Waiver',r.waiverGrade,`${fmtVal(r.waiverVal)} · ${r.waiverCount}`)}
+      </div>
+    </div>`;
+  }).join('')+`</div>
+  <p style="font-size:11px;color:var(--text3);text-align:center;margin-top:12px">Grades are ranked within your league (A = top ~20%). Draft = current value vs. draft-slot expectation · Trade = net value in/out at today's prices (hindsight) · Waiver = value of pickups still rostered. FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
