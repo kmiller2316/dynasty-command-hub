@@ -721,15 +721,8 @@ const PICK_VALUES = {
 };
 const DEFAULT_PICK = {1:4500,2:2200,3:900,4:300};
 
+// Slight TE discount when blending position grades into an overall GPA.
 const POSITION_WEIGHTS = { QB:1.0, RB:1.0, WR:1.0, TE:0.85 };
-
-const GRADE_THRESHOLDS = [
-  {g:'A',minValue:5000,maxAge:26},
-  {g:'B',minValue:3000,maxAge:28},
-  {g:'C',minValue:1500,maxAge:30},
-  {g:'D',minValue:500,maxAge:99},
-  {g:'F',minValue:0,maxAge:99}
-];
 
 const DRAFT_ADP_TIERS = {
   QB: [["Caleb Williams","Jayden Daniels","C.J. Stroud","Brock Purdy","Josh Allen"],
@@ -2028,61 +2021,108 @@ let gmSort='overall';
 async function loadGmGrades(){
   $id('gmResult').innerHTML=''; show('gmLoading');
   try{
-    // completed rookie draft picks
-    const draftPicks=[];
-    for(const d of (S.drafts||[])){
-      if(d.status!=='complete') continue;
-      const ps=await get(SLEEPER(`/draft/${d.draft_id}/picks`)).catch(()=>[]);
-      ps.forEach(p=>draftPicks.push({...p,dseason:d.season}));
+    // Walk the league lineage (previous_league_id) to grade drafts across every
+    // available season, not just this one. More picks = less single-year noise.
+    const draftPicks=[]; const seasonsGraded=[];
+    let info=S.leagueInfo, drafts=S.drafts||[], guard=0;
+    while(info && guard++<6){
+      for(const d of drafts){
+        // rookie drafts only — skip multi-round startup drafts (veterans, ~15-22
+        // rounds), which don't fit the rookie draft-slot expectation model
+        if(d.status!=='complete' || (d.settings?.rounds||99)>6) continue;
+        const ps=await get(SLEEPER(`/draft/${d.draft_id}/picks`)).catch(()=>[]);
+        ps.forEach(p=>draftPicks.push({...p,dseason:d.season}));
+        if(ps.length) seasonsGraded.push(d.season);
+      }
+      const prev=info.previous_league_id;
+      if(!prev) break;
+      info=await get(SLEEPER(`/league/${prev}`)).catch(()=>null);
+      drafts=info?await get(SLEEPER(`/league/${prev}/drafts`)).catch(()=>[]):[];
     }
-    // every transaction across the season
+    // Trades + waivers stay current-season (their value at today's prices reflects
+    // the roster you have now; older moves have long since changed hands).
     const maxW=Math.max(S.currentWeek||1,S.totalWeeks||1,18);
     const weeks=await Promise.all(Array.from({length:maxW},(_,i)=>get(SLEEPER(`/league/${S.leagueId}/transactions/${i+1}`)).catch(()=>[])));
     S.gmData=computeGmGrades(draftPicks,weeks.flat());
+    S.gmSeasons=[...new Set(seasonsGraded)].sort();
     $id('gmControls').style.display='block';
     renderGmGrades();
   }catch(e){ $id('gmResult').innerHTML=`<div class="err">${esc(e.message)}</div><div class="center" style="padding:12px"><button class="btn btn-primary" style="width:auto" onclick="loadGmGrades()">Retry</button></div>`; }
   hide('gmLoading');
 }
 
+// Season-ending / long-term injury statuses that unfairly depress a player's
+// current value — used to give partial "process credit" so bad injury luck
+// doesn't fully sink a grade.
+const HURT_STATUS=new Set(['IR','PUP','Sus','NA','DNR','Out']);
+function isHurt(pid){ return HURT_STATUS.has((S.players[pid]?.injury_status||'').trim()); }
+// Value of a player now, but floored toward an expectation when currently hurt,
+// so a good pick/pickup that got injured keeps most of its credit.
+function luckAdjustedValue(pid,expectation){
+  const v=fcVal(S.players[pid])?.value||0;
+  return isHurt(pid)?Math.max(v,(expectation||0)*0.7):v;
+}
 function computeGmGrades(draftPicks,tx){
   const teams=S.allRosters.length;
   const pidVal=pid=>fcVal(S.players[pid])?.value||0;
+  // attribute by the manager (user_id) so prior-season picks map to the right
+  // current owner even if roster_ids shifted between seasons
+  const userToRid={}; S.allRosters.forEach(r=>{ if(r.owner_id) userToRid[r.owner_id]=r.roster_id; });
   const acc={};
-  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftVOE:0,draftCount:0,tradeNet:0,tradeCount:0,waiverVal:0,waiverCount:0});
+  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftContribs:[],hurtDraft:0,tradeContribs:[],tradeCount:0,waiverContribs:[],waiverCount:0});
 
-  // DRAFT: current value vs the value expected at that draft slot
+  // DRAFT: each pick's luck-adjusted value now vs. the value expected at its slot
   draftPicks.forEach(p=>{
-    const a=acc[p.roster_id]; if(!a) return;
+    const rid=userToRid[p.picked_by]??p.roster_id;
+    const a=acc[rid]; if(!a) return;
     const slotInRound=p.pick_no-(p.round-1)*teams;
     const expected=slotPickValue(p.dseason,p.round,slotInRound,teams);
-    a.draftVOE+=(pidVal(p.player_id)-expected); a.draftCount++;
+    a.draftContribs.push(luckAdjustedValue(p.player_id,expected)-expected);
+    if(isHurt(p.player_id)) a.hurtDraft++;
   });
 
-  // TRADES: net current value in vs out (players + picks)
+  // TRADES: net current value in vs out (players + picks), per trade
   tx.filter(t=>t.type==='trade'&&t.status==='complete').forEach(t=>{
     (t.roster_ids||[]).forEach(rid=>{
       const a=acc[rid]; if(!a) return; a.tradeCount++;
-      Object.entries(t.adds||{}).forEach(([pid,r])=>{ if(r===rid) a.tradeNet+=pidVal(pid); });
-      Object.entries(t.drops||{}).forEach(([pid,r])=>{ if(r===rid) a.tradeNet-=pidVal(pid); });
-      (t.draft_picks||[]).forEach(dp=>{ const v=pickValue(dp.season,dp.round); if(dp.owner_id===rid) a.tradeNet+=v; if(dp.previous_owner_id===rid) a.tradeNet-=v; });
+      let net=0;
+      Object.entries(t.adds||{}).forEach(([pid,r])=>{ if(r===rid) net+=pidVal(pid); });
+      Object.entries(t.drops||{}).forEach(([pid,r])=>{ if(r===rid) net-=pidVal(pid); });
+      (t.draft_picks||[]).forEach(dp=>{ const v=pickValue(dp.season,dp.round); if(dp.owner_id===rid) net+=v; if(dp.previous_owner_id===rid) net-=v; });
+      a.tradeContribs.push(net);
     });
   });
 
-  // WAIVERS/FA: value of pickups still on the roster today
+  // WAIVERS/FA: value of each pickup still on the roster today
   tx.filter(t=>(t.type==='waiver'||t.type==='free_agent')&&t.status==='complete').forEach(t=>{
     Object.entries(t.adds||{}).forEach(([pid,rid])=>{
       const a=acc[rid]; if(!a) return; a.waiverCount++;
       const roster=S.allRosters.find(r=>String(r.roster_id)===String(rid));
-      if(roster&&(roster.players||[]).map(String).includes(String(pid))) a.waiverVal+=pidVal(pid);
+      if(roster&&(roster.players||[]).map(String).includes(String(pid))) a.waiverContribs.push(luckAdjustedValue(pid,0));
     });
   });
 
+  // Winsorize each category league-wide, then total per manager.
   const rows=Object.values(acc);
+  const clampByCat=key=>{
+    const all=[]; rows.forEach(r=>r[key].forEach(v=>all.push(v)));
+    if(all.length<4) return; // too few to define a robust band
+    const s=[...all].sort((a,b)=>a-b);
+    const q=p=>s[Math.min(s.length-1,Math.max(0,Math.round(p*(s.length-1))))];
+    const lo=q(0.10), hi=q(0.90);
+    rows.forEach(r=>{ r[key]=r[key].map(v=>Math.max(lo,Math.min(hi,v))); });
+  };
+  ['draftContribs','tradeContribs','waiverContribs'].forEach(clampByCat);
+  rows.forEach(r=>{
+    r.draftVOE=r.draftContribs.reduce((a,b)=>a+b,0); r.draftCount=r.draftContribs.length;
+    r.tradeNet=r.tradeContribs.reduce((a,b)=>a+b,0);
+    r.waiverVal=r.waiverContribs.reduce((a,b)=>a+b,0);
+  });
+
   // grade each metric by rank within the league (higher = better)
   gradeMetric(rows,'draftVOE','draftGrade',r=>r.draftCount>0);
   gradeMetric(rows,'tradeNet','tradeGrade',r=>r.tradeCount>0);
-  gradeMetric(rows,'waiverVal','waiverGrade',r=>true);
+  gradeMetric(rows,'waiverVal','waiverGrade',()=>true);
   rows.forEach(r=>{
     const gpas=['draftGrade','tradeGrade','waiverGrade'].map(k=>r[k]).filter(g=>g&&g!=='—').map(gradeToGpa);
     r.overallGpa=gpas.length?gpas.reduce((a,b)=>a+b,0)/gpas.length:0;
@@ -2120,13 +2160,15 @@ function renderGmGrades(){
         <div style="font-size:26px;font-weight:800;color:${gc(r.overall)}">${r.overall}</div>
       </div>
       <div style="display:flex;gap:8px;margin-top:6px">
-        ${cell('Draft',r.draftGrade,r.draftCount?money(r.draftVOE):'no picks')}
+        ${cell('Draft',r.draftGrade,r.draftCount?`${money(r.draftVOE)} · ${r.draftCount}${r.hurtDraft?` · ${r.hurtDraft}🩹`:''}`:'no picks')}
         ${cell('Trade',r.tradeGrade,r.tradeCount?`${money(r.tradeNet)} · ${r.tradeCount}`:'no trades')}
         ${cell('Waiver',r.waiverGrade,`${fmtVal(r.waiverVal)} · ${r.waiverCount}`)}
       </div>
     </div>`;
   }).join('')+`</div>
-  <p style="font-size:11px;color:var(--text3);text-align:center;margin-top:12px">Grades are ranked within your league (A = top ~20%). Draft = current value vs. draft-slot expectation · Trade = net value in/out at today's prices (hindsight) · Waiver = value of pickups still rostered. FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
+  <p style="font-size:11px;color:var(--text3);text-align:center;margin-top:12px">
+    Ranked within your league (A = top ~20%). <b>Draft</b> = value now vs. draft-slot expectation${S.gmSeasons?.length?`, across ${S.gmSeasons.join(', ')}`:''} · <b>Trade</b> = net value in/out at today's prices · <b>Waiver</b> = value of pickups still rostered · count shown after each.<br>
+    Luck-dampened: each result is capped to the league's 10th–90th percentile so one outlier can't swing a grade, and 🩹 injured players keep partial credit (bad injury luck won't fully sink a pick). FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2141,7 +2183,6 @@ function computeManagerProfiles(){
   const allTotalVals=S.allRosters.map(r=>(r.players||[]).reduce((s,id)=>s+(fcVal(S.players[id])?.value||0),0));
   const sortedValsAsc=[...allTotalVals].sort((a,b)=>a-b);
   const nTeams=S.allRosters.length;
-  const anyGames=S.allRosters.some(r=>((r.settings?.wins||0)+(r.settings?.losses||0)+(r.settings?.ties||0))>0);
 
   // league-wide positional value totals for bias comparison
   const leaguePosTotals={QB:0,RB:0,WR:0,TE:0};
