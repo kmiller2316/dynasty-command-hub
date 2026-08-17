@@ -731,6 +731,7 @@ const S = {
   leagueInfo:null, myRoster:null, allRosters:[], users:{},
   tradedPicks:[], players:{}, fcValues:{}, fcList:[],
   fcPos:{QB:[],RB:[],WR:[],TE:[]}, fcPickSlot:{}, fcPickGeneric:{}, fcPickTier:{},
+  drafts:[], completedDraftSeasons:new Set(), nextDraftSeason:null,
   matchups:{}, standings:[], transactions:[],
   currentWeek:1, totalWeeks:18, superflex:false,
   allPlayersOnRosters: new Set(),
@@ -899,15 +900,21 @@ function resetApp(){
 // ── LOAD ALL DATA ──────────────────────────────────────────────────────
 async function loadAll(){
   try{
-    const [league,rosters,usersArr,picks]=await Promise.all([
+    const [league,rosters,usersArr,picks,drafts]=await Promise.all([
       get(SLEEPER(`/league/${S.leagueId}`)),
       get(SLEEPER(`/league/${S.leagueId}/rosters`)),
       get(SLEEPER(`/league/${S.leagueId}/users`)),
       get(SLEEPER(`/league/${S.leagueId}/traded_picks`)),
+      get(SLEEPER(`/league/${S.leagueId}/drafts`)).catch(()=>[]),
     ]);
 
     S.leagueInfo=league;
     S.tradedPicks=picks;
+    // Which rookie drafts are already done — their picks are spent, not tradeable.
+    S.drafts=drafts||[];
+    S.completedDraftSeasons=new Set((drafts||[]).filter(d=>d.status==='complete').map(d=>String(d.season)));
+    const upcoming=(drafts||[]).filter(d=>d.status!=='complete').map(d=>+d.season).sort((a,b)=>a-b)[0];
+    S.nextDraftSeason=upcoming||(Math.max(parseInt(league.season)||new Date().getFullYear(),...((drafts||[]).map(d=>+d.season)))+1);
     S.currentWeek=Math.max(1,league.settings?.leg||1);
     S.totalWeeks=league.settings?.playoff_week_start||15;
     // Superflex detection: 2+ QB slots (QB or SUPER_FLEX in roster_positions)
@@ -1046,8 +1053,9 @@ function slotPickValue(season,round,pickInRound,teams){
 
 // Owned picks value for a roster
 function rosterPickValue(rosterId){
-  return S.tradedPicks.filter(p=>String(p.owner_id)===String(rosterId))
-    .reduce((s,p)=>s+pickValue(p.season,p.round),0);
+  // full upcoming inventory (own originals minus traded, plus acquired),
+  // excluding seasons whose rookie draft is already complete
+  return teamPickInventory(rosterId).reduce((s,p)=>s+p.value,0);
 }
 
 // ── ROSTER TAB ────────────────────────────────────────────────────────
@@ -1802,14 +1810,19 @@ function toggleUntouchable(id){ if(excludedIds.has(id)) excludedIds.delete(id); 
 // it traded away) plus picks it acquired. Covers this draft year through +2.
 function teamPickInventory(rosterId){
   const rid=String(rosterId);
-  const Y=parseInt(S.leagueInfo?.season)||new Date().getFullYear();
-  const years=[Y,Y+1,Y+2], rounds=[1,2,3,4];
+  const done=S.completedDraftSeasons||new Set();
+  const Y0=S.nextDraftSeason||(parseInt(S.leagueInfo?.season)||new Date().getFullYear());
+  // three upcoming draft years, skipping any whose draft is already complete
+  const years=[];
+  for(let y=Y0;years.length<3&&y<Y0+5;y++){ if(!done.has(String(y))) years.push(y); }
+  const rounds=[1,2,3,4];
   const inv=[];
   years.forEach(y=>rounds.forEach(rd=>{
     const away=S.tradedPicks.find(p=>String(p.season)===String(y)&&p.round===rd&&String(p.roster_id)===rid&&String(p.owner_id)!==rid);
     if(!away) inv.push({season:String(y),round:rd,orig:rid});
   }));
-  S.tradedPicks.filter(p=>String(p.owner_id)===rid&&String(p.roster_id)!==rid)
+  // acquired picks — but only for seasons whose draft hasn't happened yet
+  S.tradedPicks.filter(p=>String(p.owner_id)===rid&&String(p.roster_id)!==rid&&!done.has(String(p.season)))
     .forEach(p=>inv.push({season:String(p.season),round:p.round,orig:String(p.roster_id)}));
   return inv.map(p=>({type:'pick',name:`${p.season} ${['1st','2nd','3rd','4th'][p.round-1]||'Rd'+p.round}`,value:Math.round(pickValue(p.season,p.round)),pos:'PICK',age:null,season:p.season,round:p.round}));
 }
@@ -2162,14 +2175,15 @@ function renderDraftOrder(){
 
   const myPickSlot=sorted.findIndex(r=>String(r.roster_id)===String(myRId))+1;
   const totalTeams=sorted.length;
+  const draftYr=S.nextDraftSeason||((parseInt(S.leagueInfo?.season)||new Date().getFullYear())+1);
   let mySlots=[];
   for(let rd=1;rd<=4;rd++){
     const pickNum=rd%2===1?myPickSlot:(totalTeams-myPickSlot+1);
     const overall=(rd-1)*totalTeams+pickNum;
-    mySlots.push({rd,pickNum,overall,val:slotPickValue(2026,rd,pickNum,totalTeams)});
+    mySlots.push({rd,pickNum,overall,val:slotPickValue(draftYr,rd,pickNum,totalTeams)});
   }
   const noGames=sorted.every(r=>totalPts(r)===0);
-  $id('myPickSlots').innerHTML=`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">${noGames?'⚠️ Season hasn\'t started — order is provisional until games are played. ':''}Snake draft · slot-adjusted pick values</p>
+  $id('myPickSlots').innerHTML=`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">${draftYr} rookie draft · ${noGames?'order provisional until games are played · ':''}snake · slot-adjusted values</p>
     ${mySlots.map(s=>`<div class="draft-slot">
       <div class="draft-pick-num mine">${s.overall}</div>
       <div style="flex:1"><div style="font-size:13px;font-weight:600;color:var(--blue)">Round ${s.rd}, Pick ${s.pickNum}</div><div class="draft-proj">Overall #${s.overall} · ~${fmtVal(s.val)} value</div></div>
