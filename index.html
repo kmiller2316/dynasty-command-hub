@@ -632,7 +632,8 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
         <div id="gmControls" style="display:none;margin-bottom:4px">
           <div class="inner-tabs">
             <button class="inner-tab active" onclick="sortGm('overall',this)">Overall</button>
-            <button class="inner-tab" onclick="sortGm('draft',this)">Draft</button>
+            <button class="inner-tab" onclick="sortGm('startup',this)">Startup</button>
+            <button class="inner-tab" onclick="sortGm('draft',this)">Rookie Draft</button>
             <button class="inner-tab" onclick="sortGm('trade',this)">Trade</button>
             <button class="inner-tab" onclick="sortGm('waiver',this)">Waiver</button>
           </div>
@@ -2023,16 +2024,16 @@ async function loadGmGrades(){
   try{
     // Walk the league lineage (previous_league_id) to grade drafts across every
     // available season, not just this one. More picks = less single-year noise.
-    const draftPicks=[]; const seasonsGraded=[];
+    // Rookie drafts (<=6 rounds) and the one-time startup draft (>6 rounds) are
+    // graded separately — they're completely different skills.
+    const draftPicks=[]; const startupPicks=[]; const seasonsGraded=[];
     let info=S.leagueInfo, drafts=S.drafts||[], guard=0;
     while(info && guard++<6){
       for(const d of drafts){
-        // rookie drafts only — skip multi-round startup drafts (veterans, ~15-22
-        // rounds), which don't fit the rookie draft-slot expectation model
-        if(d.status!=='complete' || (d.settings?.rounds||99)>6) continue;
+        if(d.status!=='complete') continue;
         const ps=await get(SLEEPER(`/draft/${d.draft_id}/picks`)).catch(()=>[]);
-        ps.forEach(p=>draftPicks.push({...p,dseason:d.season}));
-        if(ps.length) seasonsGraded.push(d.season);
+        if((d.settings?.rounds||99)>6){ ps.forEach(p=>startupPicks.push({...p,dseason:d.season})); }
+        else { ps.forEach(p=>draftPicks.push({...p,dseason:d.season})); if(ps.length) seasonsGraded.push(d.season); }
       }
       const prev=info.previous_league_id;
       if(!prev) break;
@@ -2043,8 +2044,9 @@ async function loadGmGrades(){
     // the roster you have now; older moves have long since changed hands).
     const maxW=Math.max(S.currentWeek||1,S.totalWeeks||1,18);
     const weeks=await Promise.all(Array.from({length:maxW},(_,i)=>get(SLEEPER(`/league/${S.leagueId}/transactions/${i+1}`)).catch(()=>[])));
-    S.gmData=computeGmGrades(draftPicks,weeks.flat());
+    S.gmData=computeGmGrades(draftPicks,startupPicks,weeks.flat());
     S.gmSeasons=[...new Set(seasonsGraded)].sort();
+    S.gmHasStartup=startupPicks.length>0;
     $id('gmControls').style.display='block';
     renderGmGrades();
   }catch(e){ $id('gmResult').innerHTML=`<div class="err">${esc(e.message)}</div><div class="center" style="padding:12px"><button class="btn btn-primary" style="width:auto" onclick="loadGmGrades()">Retry</button></div>`; }
@@ -2062,16 +2064,19 @@ function luckAdjustedValue(pid,expectation){
   const v=fcVal(S.players[pid])?.value||0;
   return isHurt(pid)?Math.max(v,(expectation||0)*0.7):v;
 }
-function computeGmGrades(draftPicks,tx){
+function computeGmGrades(draftPicks,startupPicks,tx){
   const teams=S.allRosters.length;
   const pidVal=pid=>fcVal(S.players[pid])?.value||0;
+  // Startup expectation: at overall pick N, a fair selection is the Nth-most
+  // valuable asset today, so grade against the current #N-ranked player's value.
+  const startupExpect=overall=>S.fcList[overall-1]?.value||0;
   // attribute by the manager (user_id) so prior-season picks map to the right
   // current owner even if roster_ids shifted between seasons
   const userToRid={}; S.allRosters.forEach(r=>{ if(r.owner_id) userToRid[r.owner_id]=r.roster_id; });
   const acc={};
-  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftContribs:[],hurtDraft:0,tradeContribs:[],tradeCount:0,waiverContribs:[],waiverCount:0});
+  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftContribs:[],hurtDraft:0,startupContribs:[],tradeContribs:[],tradeCount:0,waiverContribs:[],waiverCount:0});
 
-  // DRAFT: each pick's luck-adjusted value now vs. the value expected at its slot
+  // ROOKIE DRAFT: each pick's luck-adjusted value now vs. the value expected at its slot
   draftPicks.forEach(p=>{
     const rid=userToRid[p.picked_by]??p.roster_id;
     const a=acc[rid]; if(!a) return;
@@ -2079,6 +2084,14 @@ function computeGmGrades(draftPicks,tx){
     const expected=slotPickValue(p.dseason,p.round,slotInRound,teams);
     a.draftContribs.push(luckAdjustedValue(p.player_id,expected)-expected);
     if(isHurt(p.player_id)) a.hurtDraft++;
+  });
+
+  // STARTUP DRAFT: value now vs. the current #N-ranked asset for overall pick N
+  (startupPicks||[]).forEach(p=>{
+    const rid=userToRid[p.picked_by]??p.roster_id;
+    const a=acc[rid]; if(!a) return;
+    const expected=startupExpect(p.pick_no);
+    a.startupContribs.push(luckAdjustedValue(p.player_id,expected)-expected);
   });
 
   // TRADES: net current value in vs out (players + picks), per trade
@@ -2112,17 +2125,26 @@ function computeGmGrades(draftPicks,tx){
     const lo=q(0.10), hi=q(0.90);
     rows.forEach(r=>{ r[key]=r[key].map(v=>Math.max(lo,Math.min(hi,v))); });
   };
-  ['draftContribs','tradeContribs','waiverContribs'].forEach(clampByCat);
+  ['draftContribs','startupContribs','tradeContribs','waiverContribs'].forEach(clampByCat);
   rows.forEach(r=>{
     r.draftVOE=r.draftContribs.reduce((a,b)=>a+b,0); r.draftCount=r.draftContribs.length;
+    r.startupVOE=r.startupContribs.reduce((a,b)=>a+b,0); r.startupCount=r.startupContribs.length;
     r.tradeNet=r.tradeContribs.reduce((a,b)=>a+b,0);
     r.waiverVal=r.waiverContribs.reduce((a,b)=>a+b,0);
   });
 
-  // grade each metric by rank within the league (higher = better)
+  // grade each metric by rank within the league (higher = better).
+  // Startup is graded and shown on its own; it stays OUT of the overall GPA
+  // since it's a one-time founding event and newer managers never drafted one.
   gradeMetric(rows,'draftVOE','draftGrade',r=>r.draftCount>0);
+  gradeMetric(rows,'startupVOE','startupGrade',r=>r.startupCount>0);
   gradeMetric(rows,'tradeNet','tradeGrade',r=>r.tradeCount>0);
   gradeMetric(rows,'waiverVal','waiverGrade',()=>true);
+  // Startup values are all offset negative (2024 picks vs today's prices), so
+  // display each relative to the league average — best reads positive, worst negative.
+  const suElig=rows.filter(r=>r.startupCount>0);
+  const suMean=suElig.length?suElig.reduce((s,r)=>s+r.startupVOE,0)/suElig.length:0;
+  rows.forEach(r=>r.startupRel=r.startupCount>0?r.startupVOE-suMean:0);
   rows.forEach(r=>{
     const gpas=['draftGrade','tradeGrade','waiverGrade'].map(k=>r[k]).filter(g=>g&&g!=='—').map(gradeToGpa);
     r.overallGpa=gpas.length?gpas.reduce((a,b)=>a+b,0)/gpas.length:0;
@@ -2143,32 +2165,34 @@ function sortGm(k,btn){ gmSort=k; document.querySelectorAll('#gmControls .inner-
 
 function renderGmGrades(){
   const rows=[...(S.gmData||[])];
-  const key={overall:'overallGpa',draft:'draftVOE',trade:'tradeNet',waiver:'waiverVal'}[gmSort];
+  const key={overall:'overallGpa',startup:'startupVOE',draft:'draftVOE',trade:'tradeNet',waiver:'waiverVal'}[gmSort];
   rows.sort((a,b)=>(b[key]||0)-(a[key]||0));
   const gc=g=>gradeColor(g==='—'?'C':g);
   const money=v=>(v>=0?'+':'−')+fmtVal(Math.abs(Math.round(v)));
+  const hasStartup=S.gmHasStartup;
   $id('gmResult').innerHTML=`<div class="mgr-grid">`+rows.map(r=>{
     const isMe=String(r.rid)===String(S.myRoster.roster_id);
-    const cell=(label,grade,detail)=>`<div style="flex:1;text-align:center">
+    const cell=(label,grade,detail)=>`<div style="flex:1;text-align:center;min-width:60px">
         <div style="font-size:22px;font-weight:800;color:${gc(grade)}">${grade}</div>
         <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${label}</div>
         <div style="font-size:11px;color:var(--text2);margin-top:2px">${detail}</div>
       </div>`;
     return `<div class="mgr-card ${isMe?'mine':''}">
       <div class="mgr-head">
-        <div><div class="mgr-name">${esc(r.name)}${isMe?' ★':''}</div><div class="mgr-label">Overall GM grade</div></div>
+        <div><div class="mgr-name">${esc(r.name)}${isMe?' ★':''}</div><div class="mgr-label">Overall GM grade${hasStartup?' (excl. startup)':''}</div></div>
         <div style="font-size:26px;font-weight:800;color:${gc(r.overall)}">${r.overall}</div>
       </div>
-      <div style="display:flex;gap:8px;margin-top:6px">
-        ${cell('Draft',r.draftGrade,r.draftCount?`${money(r.draftVOE)} · ${r.draftCount}${r.hurtDraft?` · ${r.hurtDraft}🩹`:''}`:'no picks')}
+      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+        ${hasStartup?cell('Startup',r.startupGrade,r.startupCount?`${money(r.startupRel)} vs avg`:'didn’t draft'):''}
+        ${cell('Rookie Draft',r.draftGrade,r.draftCount?`${money(r.draftVOE)} · ${r.draftCount}${r.hurtDraft?` · ${r.hurtDraft}🩹`:''}`:'no picks')}
         ${cell('Trade',r.tradeGrade,r.tradeCount?`${money(r.tradeNet)} · ${r.tradeCount}`:'no trades')}
         ${cell('Waiver',r.waiverGrade,`${fmtVal(r.waiverVal)} · ${r.waiverCount}`)}
       </div>
     </div>`;
   }).join('')+`</div>
   <p style="font-size:11px;color:var(--text3);text-align:center;margin-top:12px">
-    Ranked within your league (A = top ~20%). <b>Draft</b> = value now vs. draft-slot expectation${S.gmSeasons?.length?`, across ${S.gmSeasons.join(', ')}`:''} · <b>Trade</b> = net value in/out at today's prices · <b>Waiver</b> = value of pickups still rostered · count shown after each.<br>
-    Luck-dampened: each result is capped to the league's 10th–90th percentile so one outlier can't swing a grade, and 🩹 injured players keep partial credit (bad injury luck won't fully sink a pick). FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
+    Ranked within your league (A = top ~20%). ${hasStartup?'<b>Startup</b> = value now vs. the going rate at that overall pick (one-time, graded separately, not in overall) · ':''}<b>Rookie Draft</b> = value now vs. draft-slot expectation${S.gmSeasons?.length?`, across ${S.gmSeasons.join(', ')}`:''} · <b>Trade</b> = net value in/out at today's prices · <b>Waiver</b> = value of pickups still rostered.<br>
+    Luck-dampened: each result is capped to the league's 10th–90th percentile so one outlier can't swing a grade, and 🩹 injured players keep partial credit. FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
