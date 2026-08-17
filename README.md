@@ -17,9 +17,10 @@ Open it on your phone in Safari → **Share → Add to Home Screen** to install 
 | 📅 **Weekly** | Week-by-week matchups, results, and season standings. |
 | 🏛️ **Dynasty Value** | Your roster ranked by dynasty value, plus an automatic **A–F roster grade report** (per position + overall, age curve, strengths/weaknesses, 12-month outlook). |
 | ⚖️ **Trade Grader** | Build any trade by searching players or picks. Toggle **Lowball / Fair / Overpay** to shift the verdict, and exclude any piece from the estimate with one tap. |
-| 📨 **Trade Finder** | Target *any* player in the league — it finds the owner, builds a fair opening offer from your assets, flags untouchables you set, and estimates acceptance odds. |
+| 📨 **Trade Finder** | **Buy** any player (finds the owner and builds a fair offer from your assets) or **Sell** one of yours (ranks likely buyers and what they'd send back). Filter returns to **picks only** or **youth**, target a specific team or anyone, and set untouchables. |
 | 🎯 **Draft Center** | Projected draft order, your pick slots, best-available players, and a rule-based mock draft simulator. |
-| 👤 **Managers** | League-wide scouting: win-now index, age profile, positional bias, pick capital, roster construction, and matchup luck for every team — with trade-fit flags where a rival's surplus meets your need. |
+| 👤 **Managers** | League-wide scouting: win-now index, age profile, positional bias, pick capital, roster construction, and matchup luck for every team — with a legend and trade-fit flags. |
+| 📊 **GM Grades** | Report card grading every manager on **drafting** (picks vs. draft-slot expectation), **trading** (net value across all deals), and **waivers** (value of pickups still rostered). |
 | 🏅 **Commissioner** | Reverse-points draft order, projected final order, trade log, and full-season results. |
 
 ## How it works
@@ -27,7 +28,7 @@ Open it on your phone in Safari → **Share → Add to Home Screen** to install 
 All analysis runs **client-side with rule-based engines** — no LLM calls, no server, no cost per use.
 
 - **Sleeper API** (free, no key) — leagues, rosters, users, matchups, traded picks.
-- **FantasyCalc API** (free, no key) — current dynasty player values, with automatic 1QB / Superflex detection based on your league settings.
+- **FantasyCalc API** (free, no key) — current dynasty player and draft-pick values, matched to your league's format (1QB / Superflex, PPR, team count).
 - **Static pick-value chart** — bundled in the file for draft-pick valuation.
 
 Nothing is stored anywhere but your own browser's `localStorage` (used only to remember recently loaded leagues).
