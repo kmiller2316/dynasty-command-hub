@@ -494,12 +494,34 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
     <div id="tab-traderec" class="tab">
       <div class="card">
         <div class="card-title green">📨 Trade Target Finder</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Pick a player you want. The engine finds which manager owns him, whether they'd deal, and builds a fair opening offer from your roster + picks. Adjust the offer aggressiveness below.</p>
+        <div class="mode-toggle" id="finderDir" style="margin-bottom:10px">
+          <button class="mode-btn active" onclick="setFinderDir('buy',this)">🎯 Buy a player</button>
+          <button class="mode-btn" onclick="setFinderDir('sell',this)">📤 Sell a player</button>
+        </div>
+        <p id="finderIntro" style="font-size:13px;color:var(--text2);margin-bottom:12px">Pick a player you want. The engine finds which manager owns him, whether they'd deal, and builds a fair opening offer from your roster + picks.</p>
         <div class="search-wrap" style="margin-bottom:12px"><input type="text" id="searchTarget" placeholder="Search any player in the league to target…" oninput="onSearchInput('target')" onkeydown="onSearchKey(event,'target')" autocomplete="off"/><div id="searchResultsTarget" class="search-results" style="display:none"></div></div>
         <div id="targetChosen" style="display:none;margin-bottom:12px"></div>
+
+        <div id="sellOptions" style="display:none;margin-bottom:6px">
+          <div style="display:flex;gap:12px;flex-wrap:wrap">
+            <div>
+              <div class="field-label" style="margin-bottom:4px">What you want back</div>
+              <div class="mode-toggle" id="sellReturn">
+                <button class="mode-btn active" onclick="setSellReturn('any',this)">Any assets</button>
+                <button class="mode-btn" onclick="setSellReturn('picks',this)">Picks only</button>
+                <button class="mode-btn" onclick="setSellReturn('youth',this)">Youth</button>
+              </div>
+            </div>
+            <div>
+              <div class="field-label" style="margin-bottom:4px">From team</div>
+              <select id="sellFrom" style="width:auto;margin-bottom:0;font-size:12px;padding:6px 10px"><option value="any">Anyone (best fits)</option></select>
+            </div>
+          </div>
+        </div>
+
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
           <div>
-            <div class="field-label" style="margin-bottom:4px">Offer Style</div>
+            <div class="field-label" style="margin-bottom:4px" id="offerStyleLbl">Offer Style</div>
             <div class="mode-toggle" id="finderMode">
               <button class="mode-btn" onclick="setFinderMode('lowball',this)">🪙 Lowball</button>
               <button class="mode-btn active" onclick="setFinderMode('fair',this)">⚖️ Fair</button>
@@ -507,11 +529,11 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
             </div>
           </div>
         </div>
-        <div style="margin-top:10px">
+        <div id="excludeWrap" style="margin-top:10px">
           <div class="field-label" style="margin-bottom:6px">Exclude my players from any offer (untouchables)</div>
           <div id="excludeList" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
-        <button class="btn btn-primary" style="width:auto;margin-top:14px" onclick="generateOffers()">🔍 Find Offer</button>
+        <button class="btn btn-primary" style="width:auto;margin-top:14px" id="finderBtn" onclick="generateOffers()">🔍 Find Offer</button>
       </div>
       <div id="tradeRecErr" class="err" style="display:none;margin-bottom:12px"></div>
       <div id="tradeRecList"></div>
@@ -1693,6 +1715,8 @@ function nearestPieceValue(target){
 // ENGINE 3 — TRADE FINDER (replaces buildOffers) — target-driven offer builder
 // ══════════════════════════════════════════════════════════════════════════
 let finderMode='fair';
+let finderDir='buy';        // 'buy' = get a player · 'sell' = move one of mine
+let sellReturn='any';       // 'any' | 'picks' | 'youth'
 let finderTarget=null;
 const excludedIds=new Set(); // my player ids marked untouchable
 
@@ -1700,6 +1724,35 @@ function setFinderMode(m,btn){
   finderMode=m;
   document.querySelectorAll('#finderMode .mode-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
+}
+function setSellReturn(m,btn){
+  sellReturn=m;
+  document.querySelectorAll('#sellReturn .mode-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function setFinderDir(d,btn){
+  finderDir=d;
+  document.querySelectorAll('#finderDir .mode-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  clearFinderTarget(); $id('tradeRecList').innerHTML=''; hideErr('tradeRecErr');
+  const sell=d==='sell';
+  $id('sellOptions').style.display=sell?'block':'none';
+  $id('excludeWrap').style.display=sell?'none':'block';
+  $id('offerStyleLbl').textContent=sell?'Return Style (what they send)':'Offer Style';
+  $id('finderBtn').textContent=sell?'🔍 Find Buyers':'🔍 Find Offer';
+  $id('searchTarget').placeholder=sell?'Search one of YOUR players to move…':'Search any player in the league to target…';
+  $id('finderIntro').textContent=sell
+    ?'Pick a player you want to move. The engine finds which managers would want him and what they could send back — filter to picks-only to see what a rebuild-for-picks looks like.'
+    :'Pick a player you want. The engine finds which manager owns him, whether they’d deal, and builds a fair opening offer from your roster + picks.';
+  populateSellFrom();
+}
+function populateSellFrom(){
+  const sel=$id('sellFrom'); if(!sel) return;
+  const cur=sel.value;
+  sel.innerHTML='<option value="any">Anyone (best fits)</option>'+
+    S.allRosters.filter(r=>String(r.roster_id)!==String(S.myRoster.roster_id))
+      .map(r=>`<option value="${r.roster_id}">${esc(ownerName(r))}</option>`).join('');
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
 }
 
 // Which roster owns a player (by fuzzy name → sleeper id → roster)
@@ -1717,7 +1770,11 @@ function setFinderTarget(piece){
   const owner=piece.type==='player'?findOwnerOfName(piece.name):null;
   const mine=owner&&String(owner.roster.roster_id)===String(S.myRoster.roster_id);
   let ownLine;
-  if(!owner) ownLine='<span style="color:var(--yellow)">Not on any roster — free agent / undrafted. Add via waivers, not a trade.</span>';
+  if(finderDir==='sell'){
+    if(!owner||!mine) ownLine='<span style="color:var(--yellow)">This isn’t on your roster — sell mode moves one of YOUR players.</span>';
+    else ownLine='<span style="color:var(--green)">Your player — finding buyers.</span>';
+  }
+  else if(!owner) ownLine='<span style="color:var(--yellow)">Not on any roster — free agent / undrafted. Add via waivers, not a trade.</span>';
   else if(mine) ownLine='<span style="color:var(--blue)">You already own this player.</span>';
   else ownLine=`Owned by <strong style="color:var(--green)">${esc(ownerName(owner.roster))}</strong>`;
   $id('targetChosen').style.display='block';
@@ -1741,33 +1798,56 @@ function renderExcludeList(){
 }
 function toggleUntouchable(id){ if(excludedIds.has(id)) excludedIds.delete(id); else excludedIds.add(id); renderExcludeList(); }
 
-// Build an offer that reaches a target value using my tradeable assets
-function buildPackage(targetVal){
-  // candidate pool: my players (not untouchable) + my owned picks
-  const players=myPlayersWithFc()
-    .filter(x=>!excludedIds.has(x.id) && (x.fc?.value||0)>0)
-    .map(x=>({type:'player',name:pName(x.p),value:x.fc.value,pos:pPos(x.p),age:pAge(x.p),id:x.id}));
-  const picks=S.tradedPicks.filter(p=>String(p.owner_id)===String(S.myRoster.roster_id))
-    .map(p=>({type:'pick',name:`${p.season} ${['1st','2nd','3rd','4th'][p.round-1]||'Rd'+p.round}`,value:pickValue(p.season,p.round),pos:'PICK',age:null}));
-  const pool=[...players,...picks].sort((a,b)=>b.value-a.value);
+// A team's realistic tradeable pick inventory: its own native picks (minus any
+// it traded away) plus picks it acquired. Covers this draft year through +2.
+function teamPickInventory(rosterId){
+  const rid=String(rosterId);
+  const Y=parseInt(S.leagueInfo?.season)||new Date().getFullYear();
+  const years=[Y,Y+1,Y+2], rounds=[1,2,3,4];
+  const inv=[];
+  years.forEach(y=>rounds.forEach(rd=>{
+    const away=S.tradedPicks.find(p=>String(p.season)===String(y)&&p.round===rd&&String(p.roster_id)===rid&&String(p.owner_id)!==rid);
+    if(!away) inv.push({season:String(y),round:rd,orig:rid});
+  }));
+  S.tradedPicks.filter(p=>String(p.owner_id)===rid&&String(p.roster_id)!==rid)
+    .forEach(p=>inv.push({season:String(p.season),round:p.round,orig:String(p.roster_id)}));
+  return inv.map(p=>({type:'pick',name:`${p.season} ${['1st','2nd','3rd','4th'][p.round-1]||'Rd'+p.round}`,value:Math.round(pickValue(p.season,p.round)),pos:'PICK',age:null,season:p.season,round:p.round}));
+}
 
-  // Greedy: add largest asset under remaining need, then fill
-  const pkg=[]; let sum=0;
-  for(const a of pool){
-    if(sum>=targetVal) break;
-    if(sum+a.value<=targetVal*1.15){ pkg.push(a); sum+=a.value; }
+// Assets a roster could send. opts: {picksOnly, youthOnly, excludeIds:Set, excludeName}
+function rosterAssetPool(roster,opts={}){
+  const rid=roster.roster_id;
+  let players=[];
+  if(!opts.picksOnly){
+    players=(roster.players||[]).map(id=>{const p=S.players[id];const fc=fcVal(p);return {type:'player',name:pName(p),value:fc?.value||0,pos:pPos(p),age:pAge(p),id};})
+      .filter(x=>x.value>0 && !(opts.excludeIds&&opts.excludeIds.has(x.id)) && !(opts.excludeName&&x.name===opts.excludeName));
+    if(opts.youthOnly) players=players.filter(x=>x.age!=null&&x.age<25);
   }
-  // if still short, add the smallest asset that closes most of the gap
+  const picks=teamPickInventory(rid);
+  return [...players,...picks].sort((a,b)=>b.value-a.value);
+}
+
+// Greedy package from a pool that reaches ~targetVal
+function buildPackageFromPool(pool,targetVal){
+  const pkg=[]; let sum=0;
+  for(const a of pool){ if(sum>=targetVal) break; if(sum+a.value<=targetVal*1.15){ pkg.push(a); sum+=a.value; } }
   if(sum<targetVal*0.9){
-    const remaining=pool.filter(a=>!pkg.includes(a)).sort((a,b)=>a.value-b.value);
-    for(const a of remaining){ if(sum>=targetVal*0.9) break; pkg.push(a); sum+=a.value; }
+    const rest=pool.filter(a=>!pkg.includes(a)).sort((a,b)=>a.value-b.value);
+    for(const a of rest){ if(sum>=targetVal*0.9) break; pkg.push(a); sum+=a.value; }
   }
   return {pkg,sum};
+}
+
+// Build an offer that reaches a target value using MY tradeable assets
+function buildPackage(targetVal){
+  const pool=rosterAssetPool(S.myRoster,{excludeIds:excludedIds});
+  return buildPackageFromPool(pool,targetVal);
 }
 
 function generateOffers(){
   hideErr('tradeRecErr');
   $id('tradeRecList').innerHTML='';
+  if(finderDir==='sell'){ generateSellOffers(); return; }
   if(!finderTarget){ showErr('tradeRecErr','Search and pick a target player first.'); return; }
   if(finderTarget.type!=='player'){ showErr('tradeRecErr','Pick a rostered player as your target.'); return; }
   const owner=findOwnerOfName(finderTarget.name);
@@ -1826,6 +1906,68 @@ function generateOffers(){
       <div class="counter-box" style="margin-top:8px"><div class="counter-label">📈 Escalation</div><div style="font-size:12px;color:var(--text1)">${esc(counterLine)}</div></div>
     </div>
     <p style="font-size:11px;color:var(--text3);text-align:center">Values from FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'} · picks valued live from FantasyCalc. Tweak with the mode toggle or mark untouchables above.</p>`;
+}
+
+// SELL: target = one of my players; find buyers and what they'd send back.
+function generateSellOffers(){
+  if(!finderTarget){ showErr('tradeRecErr','Search and pick one of your players to move.'); return; }
+  if(finderTarget.type!=='player'){ showErr('tradeRecErr','Pick a player (not a draft pick) to sell.'); return; }
+  const owner=findOwnerOfName(finderTarget.name);
+  if(!owner||String(owner.roster.roster_id)!==String(S.myRoster.roster_id)){
+    showErr('tradeRecErr',`You don't own ${finderTarget.name}. Sell mode moves a player from YOUR roster.`); return; }
+
+  const targetVal=finderTarget.value;
+  const mode=TRADE_MODES[finderMode];
+  const factor=finderMode==='lowball'?0.88:finderMode==='overpay'?1.15:1.0; // what they send, vs his value
+  const aim=targetVal*factor;
+  const picksOnly=sellReturn==='picks', youthOnly=sellReturn==='youth';
+
+  let teams=S.allRosters.filter(r=>String(r.roster_id)!==String(S.myRoster.roster_id));
+  const fromSel=$id('sellFrom').value;
+  if(fromSel!=='any') teams=teams.filter(r=>String(r.roster_id)===String(fromSel));
+
+  const offers=teams.map(r=>{
+    const pool=rosterAssetPool(r,{picksOnly,youthOnly,excludeName:finderTarget.name});
+    const {pkg,sum}=buildPackageFromPool(pool,aim);
+    const weak=managerWeakPositions(r);
+    const needsPos=weak.includes(finderTarget.pos);
+    const shortfall=aim-sum; // >0 means they can't fully match
+    return {r,pkg,sum,needsPos,shortfall};
+  }).filter(o=>o.pkg.length)
+    .sort((a,b)=>(b.needsPos-a.needsPos)||Math.abs(a.sum-aim)-Math.abs(b.sum-aim))
+    .slice(0, fromSel!=='any'?1:3);
+
+  if(!offers.length){ showErr('tradeRecErr','No team can assemble a matching return'+(picksOnly?' with picks alone — try "Any assets".':'.')); return; }
+
+  const sideRows=arr=>arr.map(a=>`<div class="trade-item"><span>${a.pos!=='?'?`<span class="pos pos-${a.pos}" style="margin-right:6px">${a.pos}</span>`:''}${esc(a.name)}</span><span class="ti-val">${fmtVal(a.value)}</span></div>`).join('');
+
+  $id('tradeRecList').innerHTML=offers.map(o=>{
+    const myGain=o.sum-targetVal; // >0 = I come out ahead
+    const badgeCls=myGain>200?'badge-green':myGain>=-150?'badge-yellow':'badge-red';
+    const badgeTxt=(myGain>=0?'You +':'They +')+fmtVal(Math.abs(myGain));
+    const canMatch=o.shortfall<=targetVal*0.1;
+    const odds=!o.needsPos?'Lukewarm — no clear need at this position'
+      : !canMatch?'Interested, but light on matching value'
+      : myGain>200?'Strong — they’d likely bite (you win value)'
+      : 'Fair — realistic landing spot';
+    return `<div class="offer-card">
+      <div class="offer-header">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:15px">${esc(ownerName(o.r))}</span>
+          ${o.needsPos?'<span class="badge badge-green">Needs '+finderTarget.pos+'</span>':''}
+        </div>
+        <span class="delta-badge ${badgeCls}">${badgeTxt}</span>
+      </div>
+      <div class="trade-sides">
+        <div class="trade-side send"><div class="trade-side-label send">You Send</div>${sideRows([{name:finderTarget.name,value:targetVal,pos:finderTarget.pos}])}<div class="side-total"><span>Total</span><span>${fmtVal(targetVal)}</span></div></div>
+        <div class="trade-side recv"><div class="trade-side-label recv">You Receive</div>${sideRows(o.pkg)}<div class="side-total"><span>Total</span><span>${fmtVal(o.sum)}</span></div></div>
+      </div>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:8px"><span style="color:var(--blue);font-weight:600">${mode.label} return · </span>${esc(mode.note)}${picksOnly?' <span class="badge badge-purple">Picks only</span>':youthOnly?' <span class="badge badge-blue">Youth</span>':''}</p>
+      <div class="mgr-metric"><span>Buyer interest</span><span class="mv">${odds}</span></div>
+      ${o.shortfall>targetVal*0.1?`<div class="counter-box" style="margin-top:8px"><div class="counter-label">⚠️ Value gap</div><div style="font-size:12px;color:var(--text1)">Their best ${picksOnly?'pick package':'package'} is ~${fmtVal(o.shortfall)} short — you'd be selling at a discount or need to add a throw-in from their side.</div></div>`:''}
+    </div>`;
+  }).join('')+
+  `<p style="font-size:11px;color:var(--text3);text-align:center">Buyers ranked by positional need + value match. Their picks include their own originals (minus any traded) plus acquired picks. FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
 }
 
 function managerWeakPositions(r){
