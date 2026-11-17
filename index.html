@@ -440,6 +440,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
         </div>
         <div class="card">
           <div class="card-title purple">📊 Roster Grade Report</div>
+          <p style="font-size:12px;color:var(--text3);margin:-4px 0 12px">Each position blends its dynasty-value rank with actual in-season production (your players' league-scored PPG). Production's weight grows as the season goes; ▲/▼ shows who's out- or under-performing their market value.</p>
           <div id="dynastyAI"></div>
         </div>
       </div>
@@ -642,7 +643,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
         <p style="font-size:13px;color:var(--text2);margin-bottom:6px">Grades every manager on three skills, using FantasyCalc values at today's prices:</p>
         <ul style="font-size:12px;color:var(--text3);margin:0 0 12px 18px;line-height:1.7">
           <li><b style="color:var(--text2)">Drafting</b> — did their rookie picks turn out better or worse than the draft slot suggested?</li>
-          <li><b style="color:var(--text2)">Trading</b> — net value gained or lost across all completed trades.</li>
+          <li><b style="color:var(--text2)">Trading</b> — market value gained or lost across all completed trades, blended with the league points acquired players have actually scored since each trade.</li>
           <li><b style="color:var(--text2)">Waivers</b> — value of players they pulled off waivers/FA that are still on their roster.</li>
         </ul>
         <div id="gmControls" style="display:none;margin-bottom:4px">
@@ -780,7 +781,8 @@ const S = {
   matchups:{}, standings:[], transactions:[],
   currentWeek:1, totalWeeks:18, superflex:false,
   allPlayersOnRosters: new Set(),
-  managerProfiles:[], leagueMedians:{}
+  managerProfiles:[], leagueMedians:{},
+  seasonProd:null, weeklyPoints:null, prodRanks:null
 };
 
 const SLEEPER = p => `https://api.sleeper.app/v1${p}`;
@@ -929,7 +931,7 @@ async function refreshData(){
 
 // ── RESET ──────────────────────────────────────────────────────────────
 function resetApp(){
-  Object.assign(S,{leagueInfo:null,myRoster:null,allRosters:[],users:{},tradedPicks:[],players:{},fcValues:{},fcList:[],fcPos:{QB:[],RB:[],WR:[],TE:[]},fcPickSlot:{},fcPickGeneric:{},fcPickTier:{},matchups:{},standings:[],transactions:[],allPlayersOnRosters:new Set(),managerProfiles:[],leagueMedians:{}});
+  Object.assign(S,{leagueInfo:null,myRoster:null,allRosters:[],users:{},tradedPicks:[],players:{},fcValues:{},fcList:[],fcPos:{QB:[],RB:[],WR:[],TE:[]},fcPickSlot:{},fcPickGeneric:{},fcPickTier:{},matchups:{},standings:[],transactions:[],allPlayersOnRosters:new Set(),managerProfiles:[],leagueMedians:{},seasonProd:null,weeklyPoints:null,prodRanks:null});
   tradePieces.give=[]; tradePieces.get=[]; finderTarget=null;
   show('rosterLoading'); hide('rosterContent');
   $id('weeklyStats').innerHTML=''; $id('matchupList').innerHTML=''; $id('standingsList').innerHTML='';
@@ -1029,6 +1031,10 @@ async function loadAll(){
     renderDraftOrder();
     computeManagerProfiles();
     renderExcludeList();
+
+    // Aggregate in-season production in the background, then upgrade the
+    // value-only grades to the blended (value + production) grades.
+    ensureSeasonProd().then(()=>{ renderDynasty(); }).catch(()=>{});
 
   } catch(e){
     hide('rosterLoading');
@@ -1471,14 +1477,113 @@ function gradeToGpa(g){ return {A:4,B:3,C:2,D:1,F:0}[g]??0; }
 function gpaToGrade(x){ return x>=3.5?'A':x>=2.5?'B':x>=1.5?'C':x>=0.5?'D':'F'; }
 function gradeColor(g){ return {A:'var(--green)',B:'var(--blue)',C:'var(--yellow)',D:'var(--orange)',F:'var(--red)'}[g]||'var(--text3)'; }
 
+// ══════════════════════════════════════════════════════════════════════════
+// IN-SEASON PRODUCTION ENGINE — league-scored actuals, shared by roster + trade grades
+// ══════════════════════════════════════════════════════════════════════════
+// Aggregate this league's weekly matchups (weeks 1..current) into per-player
+// season points IN THIS LEAGUE'S SCORING, plus per-week points for trade timing.
+async function ensureSeasonProd(force){
+  if(S.seasonProd && !force) return;
+  const wks=[]; for(let w=1;w<=Math.max(1,S.currentWeek);w++) wks.push(w);
+  const all=await Promise.all(wks.map(w=>get(SLEEPER(`/league/${S.leagueId}/matchups/${w}`)).catch(()=>[])));
+  const weekly={}, tot={};
+  all.forEach((ms,i)=>{
+    const w=wks[i]; weekly[w]={};
+    (ms||[]).forEach(m=>{
+      const pp=m.players_points||{};
+      for(const pid in pp){
+        const v=+pp[pid]||0; weekly[w][pid]=v;
+        if(!tot[pid]) tot[pid]={pts:0,games:0};
+        tot[pid].pts+=v; if(v>0) tot[pid].games++;
+      }
+    });
+  });
+  S.weeklyPoints=weekly;
+  const prod={};
+  for(const pid in tot){ const t=tot[pid]; prod[pid]={pts:t.pts,games:t.games,ppg:t.games?t.pts/t.games:0}; }
+  S.seasonProd=prod;
+  computeProdRanks();
+}
+
+// Rank every rostered player within its position by BOTH dynasty value and
+// actual PPG, among the league's rostered pool — the basis for blended grades.
+function computeProdRanks(){
+  const byPos={QB:[],RB:[],WR:[],TE:[]};
+  S.allRosters.forEach(r=>{(r.players||[]).forEach(pid=>{
+    const p=S.players[pid]; if(!p) return; const pos=pPos(p); if(!byPos[pos]) return;
+    const pr=S.seasonProd?.[pid]||{ppg:0,games:0,pts:0};
+    byPos[pos].push({pid,val:fcVal(p)?.value||0,ppg:pr.ppg,games:pr.games,pts:pr.pts});
+  });});
+  const ranks={};
+  ['QB','RB','WR','TE'].forEach(pos=>{
+    const arr=byPos[pos];
+    [...arr].sort((a,b)=>b.val-a.val).forEach((x,i)=>{ (ranks[x.pid]=ranks[x.pid]||{}).valRank=i+1; });
+    [...arr].sort((a,b)=>b.ppg-a.ppg).forEach((x,i)=>{ const o=ranks[x.pid]=ranks[x.pid]||{}; o.prodRank=i+1; o.ppg=x.ppg; o.games=x.games; o.pts=x.pts; o.pos=pos; o.n=arr.length; });
+  });
+  S.prodRanks=ranks;
+}
+
+// Production's share of the blended grade — 0 at week 1, ramping to ~0.5 by wk 14.
+function prodWeight(){ if(!S.seasonProd) return 0; const wk=Math.max(1,S.currentWeek||1); return Math.max(0,Math.min(0.5,(wk-1)/13*0.5)); }
+
+// Player-specific blended rank: value rank blended with production rank, where
+// production is (a) shrunk toward value when the games sample is thin, and
+// (b) tilted by age (young over-performers rewarded, 30+ discounted).
+function playerGradeRank(pid){
+  const r=S.prodRanks?.[pid]; if(!r || r.valRank==null) return null;
+  const w=prodWeight(), priorK=3, g=r.games||0;
+  const prodRank=r.prodRank||r.valRank;
+  const effProd=(g*prodRank + priorK*r.valRank)/(g+priorK);   // shrink thin samples toward value
+  let blended=(1-w)*r.valRank + w*effProd;
+  const age=pAge(S.players[pid]);
+  if(age!=null){ if(age<=24) blended*=0.93; else if(age>=30) blended*=1.08; }
+  return {valRank:r.valRank,prodRank,blended,ppg:r.ppg||0,games:g,delta:r.valRank-prodRank,age};
+}
+
+function gradeFromAvgRank(avgRank,pos){
+  const teams=S.leagueInfo?.total_rosters||12;
+  const L=Math.max(1,teams*startersPerTeam(pos));
+  if(avgRank<=L*0.30) return 'A'; if(avgRank<=L*0.60) return 'B';
+  if(avgRank<=L*1.05) return 'C'; if(avgRank<=L*1.60) return 'D'; return 'F';
+}
+
+// Blended position grade for a roster: ranks my players at pos by the blended
+// (value + production) rank, grades the top-K starters, and reports the pure
+// value and production sub-grades plus a trend (producing above/below value).
+function gradePositionBlended(roster,pos){
+  const ids=(groupByPos(roster.players)[pos]||[]).map(x=>x.id);
+  const rows=ids.map(id=>({id,...playerGradeRank(id)})).filter(x=>x.valRank!=null);
+  if(!rows.length) return {grade:'F',valGrade:'F',prodGrade:'F',count:0,trend:0,avgAge:null,topPpg:0};
+  const k=startersPerTeam(pos);
+  // Grade the same starter group (chosen by blended rank) three ways — by value,
+  // by production, and blended — so the sub-grades and the trend arrow all
+  // describe the same players and stay internally consistent.
+  const byBlend=[...rows].sort((a,b)=>a.blended-b.blended).slice(0,k);
+  const avg=arr=>arr.reduce((s,x)=>s+x,0)/arr.length;
+  const avgBlend=avg(byBlend.map(x=>x.blended));
+  const avgVal=avg(byBlend.map(x=>x.valRank));
+  const avgProd=avg(byBlend.map(x=>x.prodRank));
+  const ages=rows.filter(x=>x.age!=null);
+  return {
+    grade:gradeFromAvgRank(avgBlend,pos),
+    valGrade:gradeFromAvgRank(avgVal,pos),
+    prodGrade:S.seasonProd?gradeFromAvgRank(avgProd,pos):null,
+    count:rows.length,
+    trend:avgVal-avgProd,                         // +ve = producing better (lower rank) than value
+    avgAge:ages.length?avg(ages.map(x=>x.age)):null,
+    topPpg:Math.max(...byBlend.map(x=>x.ppg))
+  };
+}
+function trendArrow(t){ return t>2?'<span style="color:var(--green)">▲</span>':t<-2?'<span style="color:var(--red)">▼</span>':'<span style="color:var(--text3)">▬</span>'; }
+function trendTxt(t){ return t>0?`+${Math.round(t)} spots`:`${Math.round(t)} spots`; }
+
 function gradeRoster(){
   const r=S.myRoster;
-  const g=groupByPos(r.players);
+  computeProdRanks();
   const posData={};
-  ['QB','RB','WR','TE'].forEach(pos=>{
-    const players=(g[pos]||[]).map(x=>{const fc=fcVal(x.p);return {p:x.p,val:fc?.value||0,age:pAge(x.p),posRank:fc?.posRank};});
-    posData[pos]=gradePosition(players,pos);
-  });
+  ['QB','RB','WR','TE'].forEach(pos=>{ posData[pos]=gradePositionBlended(r,pos); });
+  const w=prodWeight();
+  const liveLbl=S.seasonProd?`Week ${S.currentWeek} · value ${Math.round((1-w)*100)}% / production ${Math.round(w*100)}%`:'Preseason — value only';
 
   // Overall = value-weighted GPA across positions
   const weights={QB:1,RB:1,WR:1,TE:0.85};
@@ -1503,12 +1608,17 @@ function gradeRoster(){
   const rest=sortedVals.slice(3).reduce((a,b)=>a+b,0);
   const topHeavy=rest>0?top3/rest:99;
 
-  // Strengths & weaknesses (template-filled)
+  // Strengths & weaknesses (template-filled, production-aware)
   const strengths=[], weaknesses=[];
   ['QB','RB','WR','TE'].forEach(pos=>{
     const d=posData[pos];
-    if(d.grade==='A'||d.grade==='B') strengths.push(`${pos} is a strength (grade ${d.grade}, avg value ${fmtVal(d.avgVal)}${d.avgAge?`, avg age ${d.avgAge.toFixed(1)}`:''}).`);
-    if(d.grade==='D'||d.grade==='F') weaknesses.push(`${pos} needs work (grade ${d.grade}${d.count?`, only ${d.count} rostered with value`:', empty'}).`);
+    if(d.grade==='A'||d.grade==='B') strengths.push(`${pos} is a strength (grade ${d.grade}${d.avgAge?`, avg age ${d.avgAge.toFixed(1)}`:''}).`);
+    if(d.grade==='D'||d.grade==='F') weaknesses.push(`${pos} needs work (grade ${d.grade}${d.count?`, only ${d.count} rostered`:', empty'}).`);
+    // production vs value flags (only once there's a season sample)
+    if(S.seasonProd && S.currentWeek>=3){
+      if(d.trend>3) strengths.push(`${pos} is outproducing its market value (${trendTxt(d.trend)}) — a sell-high window, or just a group playing above its price.`);
+      else if(d.trend<-3) weaknesses.push(`${pos} is underproducing its market value (${trendTxt(d.trend)}) — buy-low on talent, or a drag on your weekly scoring.`);
+    }
   });
   if(youngPct>=55) strengths.push(`Young core — ${youngPct}% of roster value is in players under 25.`);
   if(oldPct>=35) weaknesses.push(`Aging assets — ${oldPct}% of value is tied up in players 29+.`);
@@ -1525,11 +1635,22 @@ function gradeRoster(){
 
   const posBadges=['QB','RB','WR','TE'].map(pos=>{
     const d=posData[pos];
-    return `<div class="stat-box"><div class="stat-val" style="color:${gradeColor(d.grade)};font-size:26px">${d.grade}</div><div class="stat-lbl">${pos}</div><div class="stat-sub">${fmtVal(d.avgVal)}${d.avgAge?` · ${d.avgAge.toFixed(0)}yo`:''}</div></div>`;
+    const sub=S.seasonProd&&d.prodGrade
+      ? `Val ${d.valGrade} · Prod ${d.prodGrade} ${trendArrow(d.trend)}`
+      : `${d.avgAge?`${d.avgAge.toFixed(0)}yo`:'—'}`;
+    return `<div class="stat-box"><div class="stat-val" style="color:${gradeColor(d.grade)};font-size:26px">${d.grade}</div><div class="stat-lbl">${pos}</div><div class="stat-sub" style="font-size:10px">${sub}</div></div>`;
   }).join('');
 
+  // Overall production vs value read (team-level): how my startable PPG ranks vs my value rank
+  let prodVsVal='';
+  if(S.seasonProd && S.currentWeek>=2){
+    const trends=['QB','RB','WR','TE'].map(p=>posData[p].trend);
+    const net=trends.reduce((a,b)=>a+b,0)/trends.length;
+    prodVsVal=net>2?'<span style="color:var(--green)">Outperforming value</span>':net<-2?'<span style="color:var(--red)">Underperforming value</span>':'<span style="color:var(--text1)">In line with value</span>';
+  }
+
   $id('dynastyAI').innerHTML=`
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;flex-wrap:wrap">
       <div style="text-align:center">
         <div style="font-size:44px;font-weight:900;color:${gradeColor(overall)};line-height:1">${overall}</div>
         <div style="font-size:11px;color:var(--text3);margin-top:2px">Overall</div>
@@ -1538,6 +1659,7 @@ function gradeRoster(){
         <div class="g4" style="gap:8px">${posBadges}</div>
       </div>
     </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:12px">⚖️ ${esc(liveLbl)}${prodVsVal?` · ${prodVsVal}`:''}</div>
     <div class="g2" style="margin-bottom:6px">
       <div class="stat-box"><div class="stat-val" style="font-size:18px;color:var(--green)">${youngPct}%</div><div class="stat-lbl">Value Under 25</div></div>
       <div class="stat-box"><div class="stat-val" style="font-size:18px;color:${topHeavy>2.2?'var(--yellow)':'var(--text1)'}">${topHeavy>10?'∞':topHeavy.toFixed(1)+'×'}</div><div class="stat-lbl">Top-3 vs Rest</div></div>
@@ -2247,6 +2369,7 @@ async function loadGmGrades(){
     // the roster you have now; older moves have long since changed hands).
     const maxW=Math.max(S.currentWeek||1,S.totalWeeks||1,18);
     const weeks=await Promise.all(Array.from({length:maxW},(_,i)=>get(SLEEPER(`/league/${S.leagueId}/transactions/${i+1}`)).catch(()=>[])));
+    await ensureSeasonProd().catch(()=>{});   // weekly points for production-since-trade
     S.gmData=computeGmGrades(draftPicks,startupPicks,weeks.flat());
     S.gmSeasons=[...new Set(seasonsGraded)].sort();
     S.gmHasStartup=startupPicks.length>0;
@@ -2277,7 +2400,9 @@ function computeGmGrades(draftPicks,startupPicks,tx){
   // current owner even if roster_ids shifted between seasons
   const userToRid={}; S.allRosters.forEach(r=>{ if(r.owner_id) userToRid[r.owner_id]=r.roster_id; });
   const acc={};
-  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftContribs:[],hurtDraft:0,startupContribs:[],tradeContribs:[],tradeCount:0,waiverContribs:[],waiverCount:0});
+  S.allRosters.forEach(r=>acc[r.roster_id]={rid:r.roster_id,name:ownerName(r),draftContribs:[],hurtDraft:0,startupContribs:[],tradeContribs:[],tradeProdContribs:[],tradeCount:0,waiverContribs:[],waiverCount:0});
+  // Points a player scored in this league in weeks strictly after `afterWk`.
+  const ptsAfter=(pid,afterWk)=>{ const wp=S.weeklyPoints||{}; let s=0; for(const w in wp){ if(+w>afterWk) s+=(+wp[w][pid]||0); } return s; };
 
   // ROOKIE DRAFT: each pick's luck-adjusted value now vs. the value expected at its slot
   draftPicks.forEach(p=>{
@@ -2297,15 +2422,20 @@ function computeGmGrades(draftPicks,startupPicks,tx){
     a.startupContribs.push(luckAdjustedValue(p.player_id,expected)-expected);
   });
 
-  // TRADES: net current value in vs out (players + picks), per trade
+  // TRADES: two lenses per trade —
+  //  (market) net current FantasyCalc value in vs out (players + picks)
+  //  (production) league points the acquired players have actually scored for the
+  //  new owner SINCE the trade, minus what the players sent away scored elsewhere.
   tx.filter(t=>t.type==='trade'&&t.status==='complete').forEach(t=>{
+    const wk=t.leg||0;   // Sleeper tags each transaction with its week
     (t.roster_ids||[]).forEach(rid=>{
       const a=acc[rid]; if(!a) return; a.tradeCount++;
-      let net=0;
-      Object.entries(t.adds||{}).forEach(([pid,r])=>{ if(r===rid) net+=pidVal(pid); });
-      Object.entries(t.drops||{}).forEach(([pid,r])=>{ if(r===rid) net-=pidVal(pid); });
+      let net=0, prod=0;
+      Object.entries(t.adds||{}).forEach(([pid,r])=>{ if(r===rid){ net+=pidVal(pid); prod+=ptsAfter(pid,wk); } });
+      Object.entries(t.drops||{}).forEach(([pid,r])=>{ if(r===rid){ net-=pidVal(pid); prod-=ptsAfter(pid,wk); } });
       (t.draft_picks||[]).forEach(dp=>{ const v=pickValue(dp.season,dp.round); if(dp.owner_id===rid) net+=v; if(dp.previous_owner_id===rid) net-=v; });
       a.tradeContribs.push(net);
+      a.tradeProdContribs.push(prod);
     });
   });
 
@@ -2328,20 +2458,31 @@ function computeGmGrades(draftPicks,startupPicks,tx){
     const lo=q(0.10), hi=q(0.90);
     rows.forEach(r=>{ r[key]=r[key].map(v=>Math.max(lo,Math.min(hi,v))); });
   };
-  ['draftContribs','startupContribs','tradeContribs','waiverContribs'].forEach(clampByCat);
+  ['draftContribs','startupContribs','tradeContribs','tradeProdContribs','waiverContribs'].forEach(clampByCat);
   rows.forEach(r=>{
     r.draftVOE=r.draftContribs.reduce((a,b)=>a+b,0); r.draftCount=r.draftContribs.length;
     r.startupVOE=r.startupContribs.reduce((a,b)=>a+b,0); r.startupCount=r.startupContribs.length;
     r.tradeNet=r.tradeContribs.reduce((a,b)=>a+b,0);
+    r.tradeProd=r.tradeProdContribs.reduce((a,b)=>a+b,0);
     r.waiverVal=r.waiverContribs.reduce((a,b)=>a+b,0);
   });
+
+  // Blend trade market value with production-since-trade. Each is z-scored across
+  // managers who've traded, then combined — production's weight ramps with the
+  // season (0 early, up to ~0.7× market by midseason) so a strong in-season
+  // buy-low shows up even before the dynasty market fully reprices it.
+  const tElig=rows.filter(r=>r.tradeCount>0);
+  const zfn=(arr,key)=>{ const n=arr.length||1; const m=arr.reduce((s,r)=>s+r[key],0)/n; const sd=Math.sqrt(arr.reduce((s,r)=>s+(r[key]-m)**2,0)/n)||1; return r=>(r[key]-m)/sd; };
+  const zMkt=zfn(tElig,'tradeNet'), zPrd=zfn(tElig,'tradeProd');
+  const prodW=(prodWeight()/0.5)*0.7;   // 0 → 0.7 across the season
+  rows.forEach(r=>{ r.tradeBlend=r.tradeCount>0?(zMkt(r)+prodW*zPrd(r)):0; });
 
   // grade each metric by rank within the league (higher = better).
   // Startup is graded and shown on its own; it stays OUT of the overall GPA
   // since it's a one-time founding event and newer managers never drafted one.
   gradeMetric(rows,'draftVOE','draftGrade',r=>r.draftCount>0);
   gradeMetric(rows,'startupVOE','startupGrade',r=>r.startupCount>0);
-  gradeMetric(rows,'tradeNet','tradeGrade',r=>r.tradeCount>0);
+  gradeMetric(rows,'tradeBlend','tradeGrade',r=>r.tradeCount>0);
   gradeMetric(rows,'waiverVal','waiverGrade',()=>true);
   // Startup values are all offset negative (2024 picks vs today's prices), so
   // display each relative to the league average — best reads positive, worst negative.
@@ -2368,7 +2509,7 @@ function sortGm(k,btn){ gmSort=k; document.querySelectorAll('#gmControls .inner-
 
 function renderGmGrades(){
   const rows=[...(S.gmData||[])];
-  const key={overall:'overallGpa',startup:'startupVOE',draft:'draftVOE',trade:'tradeNet',waiver:'waiverVal'}[gmSort];
+  const key={overall:'overallGpa',startup:'startupVOE',draft:'draftVOE',trade:'tradeBlend',waiver:'waiverVal'}[gmSort];
   rows.sort((a,b)=>(b[key]||0)-(a[key]||0));
   const gc=g=>gradeColor(g==='—'?'C':g);
   const money=v=>(v>=0?'+':'−')+fmtVal(Math.abs(Math.round(v)));
@@ -2388,13 +2529,13 @@ function renderGmGrades(){
       <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
         ${hasStartup?cell('Startup',r.startupGrade,r.startupCount?`${money(r.startupRel)} vs avg`:'didn’t draft'):''}
         ${cell('Rookie Draft',r.draftGrade,r.draftCount?`${money(r.draftVOE)} · ${r.draftCount}${r.hurtDraft?` · ${r.hurtDraft}🩹`:''}`:'no picks')}
-        ${cell('Trade',r.tradeGrade,r.tradeCount?`${money(r.tradeNet)} · ${r.tradeCount}`:'no trades')}
+        ${cell('Trade',r.tradeGrade,r.tradeCount?`${money(r.tradeNet)}${S.seasonProd?` · ${r.tradeProd>=0?'+':'−'}${Math.abs(Math.round(r.tradeProd))}pts`:''} · ${r.tradeCount}`:'no trades')}
         ${cell('Waiver',r.waiverGrade,`${fmtVal(r.waiverVal)} · ${r.waiverCount}`)}
       </div>
     </div>`;
   }).join('')+`</div>
   <p style="font-size:11px;color:var(--text3);text-align:center;margin-top:12px">
-    Ranked within your league (A = top ~20%). ${hasStartup?'<b>Startup</b> = value now vs. the going rate at that overall pick (one-time, graded separately, not in overall) · ':''}<b>Rookie Draft</b> = value now vs. draft-slot expectation${S.gmSeasons?.length?`, across ${S.gmSeasons.join(', ')}`:''} · <b>Trade</b> = net value in/out at today's prices · <b>Waiver</b> = value of pickups still rostered.<br>
+    Ranked within your league (A = top ~20%). ${hasStartup?'<b>Startup</b> = value now vs. the going rate at that overall pick (one-time, graded separately, not in overall) · ':''}<b>Rookie Draft</b> = value now vs. draft-slot expectation${S.gmSeasons?.length?`, across ${S.gmSeasons.join(', ')}`:''} · <b>Trade</b> = market value in/out at today's prices, blended with league points the acquired players have scored since the trade (pts) · <b>Waiver</b> = value of pickups still rostered.<br>
     Luck-dampened: each result is capped to the league's 10th–90th percentile so one outlier can't swing a grade, and 🩹 injured players keep partial credit. FantasyCalc ${S.superflex?'Superflex':'1QB'} · ${S.scoringLabel||'PPR'}.</p>`;
 }
 
