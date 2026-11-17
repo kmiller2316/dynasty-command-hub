@@ -358,6 +358,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
     <button onclick="showTab('dynasty',this)"><span class="nav-icon">🏛️</span>Dynasty Value</button>
     <button onclick="showTab('tradeanalyze',this)"><span class="nav-icon">⚖️</span>Trade Analyzer</button>
     <button onclick="showTab('traderec',this)"><span class="nav-icon">📨</span>Trade Finder</button>
+    <button onclick="showTab('tradetargets',this)"><span class="nav-icon">🧲</span>Trade Targets</button>
     <button onclick="showTab('draft',this)"><span class="nav-icon">🎯</span>Draft Center</button>
     <button onclick="showTab('managers',this)"><span class="nav-icon">👤</span>Managers</button>
     <button onclick="showTab('gmgrades',this)"><span class="nav-icon">📊</span>GM Grades</button>
@@ -540,6 +541,21 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
       <div id="tradeRecList"></div>
     </div>
 
+    <!-- ── TRADE TARGETS TAB ── -->
+    <div id="tab-tradetargets" class="tab">
+      <div class="card">
+        <div class="card-title green">🧲 Recommended Trade Targets</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">A league-wide scan of who you should <b style="color:var(--green)">buy</b> and who you should <b style="color:var(--orange)">sell</b> — built from your roster needs, every manager's win-now posture, and FantasyCalc values. No player search needed.</p>
+        <div class="inner-tabs">
+          <button class="inner-tab active" onclick="showTargetsPanel('ttBuy',this)">🎯 Players to Buy</button>
+          <button class="inner-tab" onclick="showTargetsPanel('ttSell',this)">📤 Players to Sell</button>
+        </div>
+      </div>
+      <div id="ttErr" class="err" style="display:none;margin-bottom:12px"></div>
+      <div id="ttBuy" class="inner-panel active"><div id="ttBuyList"></div></div>
+      <div id="ttSell" class="inner-panel"><div id="ttSellList"></div></div>
+    </div>
+
     <!-- ── DRAFT CENTER TAB ── -->
     <div id="tab-draft" class="tab">
       <div class="inner-tabs">
@@ -649,6 +665,7 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
     <div id="tab-commish" class="tab">
       <div class="inner-tabs">
         <button class="inner-tab active" onclick="showCommishPanel('commishStandings',this)">Reverse Points Order</button>
+        <button class="inner-tab" onclick="showCommishPanel('commishMaxPf',this)">Max PF Order</button>
         <button class="inner-tab" onclick="showCommishPanel('commishProjected',this)">Projected Draft</button>
         <button class="inner-tab" onclick="showCommishPanel('commishLog',this)">Trade Log</button>
         <button class="inner-tab" onclick="showCommishPanel('commishHistory',this)">Weekly History</button>
@@ -659,6 +676,14 @@ hr.divider-line{border:none;border-top:1px solid var(--border);margin:14px 0}
           <div class="card-title teal">🏅 Reverse Points Draft Order</div>
           <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Ranked lowest-to-highest total points scored. Pick 1 goes to the lowest scorer.</p>
           <div id="reverseOrderList"></div>
+        </div>
+      </div>
+
+      <div id="commishMaxPf" class="inner-panel">
+        <div class="card">
+          <div class="card-title teal">💯 Max PF Draft Order</div>
+          <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Ranked by <b>maximum potential points</b> (every team's optimal lineup each week), lowest-to-highest. Removes start/sit luck — Pick 1 goes to the team with the lowest ceiling. Efficiency = actual ÷ max points.</p>
+          <div id="maxPfOrderList"></div>
         </div>
       </div>
 
@@ -1195,12 +1220,17 @@ async function loadWeek(week){
       get(SLEEPER(`/league/${S.leagueId}/matchups/${week}`)),
       get(SLEEPER(`/league/${S.leagueId}/rosters`)),
     ]);
-    S.standings=standings;
+    // attach user info (the raw rosters fetch lacks it) so standings-based
+    // panels — standings, reverse/max-PF/projected draft order — show real names
+    const userByRid={}; S.allRosters.forEach(r=>{ if(r.user) userByRid[r.roster_id]=r.user; });
+    const withUsers=standings.map(r=>({...r,user:r.user||userByRid[r.roster_id]}));
+    S.standings=withUsers;
     renderMatchups(matchups,week);
-    renderStandings(standings);
-    renderReverseOrder(standings);
-    renderProjectedOrder(standings);
-    renderWeeklyHistory(standings);
+    renderStandings(withUsers);
+    renderReverseOrder(withUsers);
+    renderMaxPfOrder(withUsers);
+    renderProjectedOrder(withUsers);
+    renderWeeklyHistory(withUsers);
   } catch(e){ showErr('gErr','Failed to load week: '+e.message); }
   hide('weeklyLoading');
 }
@@ -1241,6 +1271,9 @@ function ownerNameById(rosterId){
 }
 
 function totalPts(r){ return (r.settings?.fpts||0)+(r.settings?.fpts_decimal||0)/100; }
+// Maximum / potential points for — the sum of each week's optimal lineup. Sleeper
+// exposes this as ppts/ppts_decimal. Falls back to actual points if unavailable.
+function maxPts(r){ const mp=(r.settings?.ppts||0)+(r.settings?.ppts_decimal||0)/100; return mp>0?mp:totalPts(r); }
 
 function renderStandings(rosters){
   const myRId=S.myRoster.roster_id;
@@ -1271,6 +1304,27 @@ function renderReverseOrder(rosters){
       <div class="standings-rank ${i<3?'draft-pick':''}">${i+1}</div>
       <div class="standings-name ${isMe?'you':''}">${esc(ownerName(r))}${isMe?' ★':''}<span style="font-size:10px;color:var(--text3);margin-left:6px">→ Pick ${i+1}</span></div>
       <div class="standings-pts"><div style="font-size:12px;font-weight:600">${totalPts(r).toFixed(1)}</div><div style="font-size:10px;color:var(--text3)">total pts</div></div>
+    </div>`;
+  }).join('');
+}
+
+function renderMaxPfOrder(rosters){
+  const myRId=S.myRoster.roster_id;
+  const anyMax=rosters.some(r=>(r.settings?.ppts||0)+(r.settings?.ppts_decimal||0)/100>0);
+  const sorted=[...rosters].sort((a,b)=>maxPts(a)-maxPts(b));
+  $id('maxPfOrderList').innerHTML=(anyMax?'':`<div style="font-size:12px;color:var(--yellow);margin-bottom:10px">⚠️ No max-points data yet from Sleeper — showing actual points until games are played.</div>`)+
+    sorted.map((r,i)=>{
+    const isMe=String(r.roster_id)===String(myRId);
+    const mp=maxPts(r), ap=totalPts(r);
+    const eff=mp>0?Math.round(ap/mp*100):0;
+    const effColor=eff>=92?'var(--green)':eff>=85?'var(--yellow)':'var(--red)';
+    return `<div class="standings-row">
+      <div class="standings-rank ${i<3?'draft-pick':''}">${i+1}</div>
+      <div class="standings-name ${isMe?'you':''}">${esc(ownerName(r))}${isMe?' ★':''}<span style="font-size:10px;color:var(--text3);margin-left:6px">→ Pick ${i+1}</span></div>
+      <div class="standings-pts">
+        <div style="font-size:12px;font-weight:600">${mp.toFixed(1)}</div>
+        <div style="font-size:10px;color:var(--text3)">max pts · <span style="color:${effColor}">${eff}% eff</span></div>
+      </div>
     </div>`;
   }).join('');
 }
@@ -2016,6 +2070,155 @@ function managerWeakPositions(r){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ENGINE 4b — RECOMMENDED TRADE TARGETS (league-wide buy/sell scan)
+// ══════════════════════════════════════════════════════════════════════════
+// Positional strength of a roster as a ratio to the league median at that pos.
+// >1 = above median (surplus), <1 = below (need).
+function posRatios(roster){
+  const pv=positionValues(roster); const out={};
+  ['QB','RB','WR','TE'].forEach(pos=>{
+    const total=pv[pos].reduce((a,b)=>a+b,0);
+    const med=S.leagueMedians[pos]||0;
+    out[pos]=med>0?total/med:1;
+  });
+  return out;
+}
+function profileFor(rid){ return S.managerProfiles.find(m=>String(m.roster_id)===String(rid)); }
+
+function showTargetsPanel(id,btn){
+  document.querySelectorAll('#tab-tradetargets .inner-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('#tab-tradetargets .inner-tab').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active'); btn.classList.add('active');
+}
+
+function renderTradeTargets(){
+  hideErr('ttErr');
+  if(!S.managerProfiles.length) computeManagerProfiles();
+  if(!S.leagueMedians || !Object.keys(S.leagueMedians).length) computeLeagueMedians();
+  const myRid=S.myRoster.roster_id;
+  const myRatios=posRatios(S.myRoster);
+  const myWeak=['QB','RB','WR','TE'].filter(p=>myRatios[p]<0.85);
+  const myStrong=['QB','RB','WR','TE'].filter(p=>myRatios[p]>1.2);
+  const startK=pos=>({QB:S.superflex?2:1,RB:2,WR:3,TE:1})[pos]||2;
+
+  // ── BUY: players on other rosters worth chasing ──────────────────────────
+  const buys=[];
+  S.allRosters.filter(r=>String(r.roster_id)!==String(myRid)).forEach(r=>{
+    const prof=profileFor(r.roster_id);
+    const ratios=posRatios(r);
+    const grouped=groupByPos(r.players);
+    ['QB','RB','WR','TE'].forEach(pos=>{
+      const list=(grouped[pos]||[]).map(x=>({p:x.p,val:fcVal(x.p)?.value||0,age:pAge(x.p),id:x.id}))
+        .filter(x=>x.val>800).sort((a,b)=>b.val-a.val);
+      list.forEach((x,idx)=>{
+        const fillsNeed=myWeak.includes(pos);
+        const upgrade=myRatios[pos]<1 && idx===0; // their best at a pos I'm merely thin at
+        if(!fillsNeed && !upgrade) return;
+        // availability: rebuilders sell; surplus at pos sells; depth pieces sell
+        const sellerLean=prof?(100-prof.winNowIdx)/100:0.5;
+        const surplus=Math.max(0,ratios[pos]-1);
+        const depthPiece=idx>=startK(pos)?0.35:(idx>0?0.15:0);
+        let avail=sellerLean*0.5+Math.min(0.35,surplus*0.3)+depthPiece;
+        avail=Math.max(0.05,Math.min(1,avail));
+        const fit=fillsNeed?1:0.45;
+        const score=fit*0.55+avail*0.45;
+        const reasons=[];
+        if(fillsNeed) reasons.push(`fills your ${pos} need`);
+        else if(upgrade) reasons.push(`upgrades a thin ${pos} group`);
+        if(prof && prof.winNowIdx<40) reasons.push(`${esc(prof.name)} is ${prof.winNowIdx<25?'rebuilding':'retooling'} (win-now ${prof.winNowIdx})`);
+        if(surplus>0.25) reasons.push(`they're ${pos}-heavy`);
+        if(idx>=startK(pos)) reasons.push('a surplus depth piece for them');
+        buys.push({x,pos,owner:r,prof,score,avail,fit,fillsNeed,reasons});
+      });
+    });
+  });
+  buys.sort((a,b)=>b.score-a.score||b.x.val-a.x.val);
+  const topBuys=buys.slice(0,10);
+
+  const availLabel=a=>a>=0.6?{t:'High',c:'var(--green)'}:a>=0.35?{t:'Medium',c:'var(--yellow)'}:{t:'Low',c:'var(--red)'};
+  $id('ttBuyList').innerHTML=(myWeak.length?`<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your thin spots: ${myWeak.map(p=>`<span class="badge badge-red">${p}</span>`).join(' ')||'none — balanced roster'}. Targets below address those first.</div>`:`<div style="font-size:12px;color:var(--text2);margin-bottom:12px">No glaring positional holes — these are best-value buy-low pieces from sellers.</div>`)+
+    (topBuys.length?topBuys.map(b=>{
+      const a=availLabel(b.avail);
+      return `<div class="offer-card">
+        <div class="offer-header">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="pos pos-${b.pos}">${b.pos}</span>
+            <span style="font-weight:700;font-size:15px">${esc(pName(b.x.p))}</span>
+            ${b.x.age!=null?`<span style="font-size:11px;color:var(--text3)">${b.x.age} yo</span>`:''}
+            ${b.fillsNeed?'<span class="badge badge-green">Fills need</span>':''}
+          </div>
+          <span class="delta-badge badge-gray">${fmtVal(b.x.val)}</span>
+        </div>
+        <div class="mgr-metric"><span>Owned by</span><span class="mv">${esc(ownerName(b.owner))}${b.prof?` · ${b.prof.profile}`:''}</span></div>
+        <div class="mgr-metric"><span>Availability</span><span class="mv" style="color:${a.c}">${a.t}</span></div>
+        <p style="font-size:12px;color:var(--text2);margin:8px 0 6px">Why: ${b.reasons.map(esc).join(' · ')}.</p>
+        <button class="btn-sm" onclick="goFinderBuy('${esc(pName(b.x.p)).replace(/'/g,"\\'")}')">📨 Build an offer →</button>
+      </div>`;
+    }).join(''):'<div style="font-size:13px;color:var(--text3);padding:12px">No clear buy targets surfaced — your roster is well-balanced relative to the league.</div>');
+
+  // ── SELL: my players worth moving ────────────────────────────────────────
+  const myGrouped=groupByPos(S.myRoster.players);
+  const sells=[];
+  ['QB','RB','WR','TE'].forEach(pos=>{
+    const list=(myGrouped[pos]||[]).map(x=>({p:x.p,val:fcVal(x.p)?.value||0,age:pAge(x.p),id:x.id}))
+      .filter(x=>x.val>500).sort((a,b)=>b.val-a.val);
+    list.forEach((x,idx)=>{
+      const surplusHere=myStrong.includes(pos);
+      const redundant=idx>=startK(pos);
+      const aging=x.age!=null&&x.age>=28;
+      if(!surplusHere && !redundant && !aging) return;
+      // best buyer: a contender weak at this pos
+      const buyers=S.allRosters.filter(r=>String(r.roster_id)!==String(S.myRoster.roster_id)).map(r=>{
+        const prof=profileFor(r.roster_id); const ratios=posRatios(r);
+        const need=ratios[pos]<0.9?(0.9-ratios[pos]):0;
+        const demand=need*0.6+(prof?prof.winNowIdx/100:0.3)*0.4;
+        return {r,prof,demand,need};
+      }).filter(b=>b.need>0).sort((a,b)=>b.demand-a.demand);
+      const buyer=buyers[0];
+      let score=(surplusHere?0.4:0)+(redundant?0.3:0)+(aging?0.3:0)+(buyer?buyer.demand*0.4:0);
+      const reasons=[];
+      if(surplusHere) reasons.push(`you're ${pos}-heavy — sell from a strength`);
+      if(redundant) reasons.push(`a bench/depth ${pos} you can spare`);
+      if(aging) reasons.push(`age ${x.age} — sell before decline`);
+      sells.push({x,pos,score,buyer,reasons});
+    });
+  });
+  sells.sort((a,b)=>b.score-a.score||b.x.val-a.x.val);
+  const topSells=sells.slice(0,8);
+  $id('ttSellList').innerHTML=(myStrong.length?`<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Your surplus: ${myStrong.map(p=>`<span class="badge badge-green">${p}</span>`).join(' ')}. Sell from strength, aging pieces, and bench depth.</div>`:`<div style="font-size:12px;color:var(--text2);margin-bottom:12px">No big positional surplus — these are aging or redundant pieces to flip while value is high.</div>`)+
+    (topSells.length?topSells.map(s=>{
+      return `<div class="offer-card">
+        <div class="offer-header">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="pos pos-${s.pos}">${s.pos}</span>
+            <span style="font-weight:700;font-size:15px">${esc(pName(s.x.p))}</span>
+            ${s.x.age!=null?`<span style="font-size:11px;color:var(--text3)">${s.x.age} yo</span>`:''}
+          </div>
+          <span class="delta-badge badge-gray">${fmtVal(s.x.val)}</span>
+        </div>
+        <div class="mgr-metric"><span>Best buyer</span><span class="mv">${s.buyer?esc(ownerName(s.buyer.r))+(s.buyer.prof?` · ${s.buyer.prof.profile}`:''):'No obvious buyer — market widely'}</span></div>
+        <p style="font-size:12px;color:var(--text2);margin:8px 0 6px">Why: ${s.reasons.map(esc).join(' · ')}.</p>
+        <button class="btn-sm" onclick="goFinderSell('${esc(pName(s.x.p)).replace(/'/g,"\\'")}')">📤 Find buyers →</button>
+      </div>`;
+    }).join(''):'<div style="font-size:13px;color:var(--text3);padding:12px">Nothing stands out to sell — your roster has no clear surplus or aging pieces to flip.</div>');
+}
+
+// Jump into the Trade Finder pre-loaded with a player (buy or sell mode).
+function goFinderBuy(name){
+  const btn=[...document.querySelectorAll('nav button')].find(b=>(b.getAttribute('onclick')||'').includes("'traderec'"));
+  if(btn) showTab('traderec',btn);
+  setFinderDir('buy',document.querySelector('#finderDir .mode-btn'));
+  const fc=fuzzyMatch(name); if(fc) setFinderTarget(toPiece(fc.name));
+}
+function goFinderSell(name){
+  const btn=[...document.querySelectorAll('nav button')].find(b=>(b.getAttribute('onclick')||'').includes("'traderec'"));
+  if(btn) showTab('traderec',btn);
+  const sellBtn=document.querySelectorAll('#finderDir .mode-btn')[1];
+  setFinderDir('sell',sellBtn);
+  const fc=fuzzyMatch(name); if(fc) setFinderTarget(toPiece(fc.name));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // GM REPORT CARD — grade each manager on drafting / trading / waivers
 // ══════════════════════════════════════════════════════════════════════════
 let gmSort='overall';
@@ -2502,8 +2705,9 @@ function showTab(name,btn){
   btn.classList.add('active');
   if(name==='draft') renderBAP();
   if(name==='traderec') renderExcludeList();
+  if(name==='tradetargets') renderTradeTargets();
   if(name==='managers'){ if(!S.managerProfiles.length) computeManagerProfiles(); else renderManagers(); }
-  if(name==='commish'){ renderReverseOrder(S.standings.length?S.standings:S.allRosters); renderProjectedOrder(S.standings.length?S.standings:S.allRosters); }
+  if(name==='commish'){ const base=S.standings.length?S.standings:S.allRosters; renderReverseOrder(base); renderMaxPfOrder(base); renderProjectedOrder(base); }
 }
 
 function showDraftPanel(id,btn){
